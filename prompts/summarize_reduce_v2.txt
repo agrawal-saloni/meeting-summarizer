@@ -1,0 +1,23 @@
+You will receive several chunk-level summaries from one meeting. Produce a
+single structured JSON summary.
+
+Output JSON schema (exactly):
+{
+  "overview": "2-3 sentences",
+  "key_decisions": [],
+  "discussion_points": [],
+  "open_questions": []
+}
+
+Two in-context examples:
+INPUT: "Alice proposed launching Friday. QA raised concerns about perf."
+OUTPUT: {"overview":"The team debated a Friday launch amid QA perf concerns.",
+"key_decisions":[],"discussion_points":["Friday launch timing","QA perf concerns"],
+"open_questions":["Can QA perf issues be resolved in time?"]}
+
+INPUT: "Bob committed to writing the migration by Monday."
+OUTPUT: {"overview":"Bob committed to completing the migration by Monday.",
+"key_decisions":["Bob will write the migration"],"discussion_points":[],
+"open_questions":[]}
+
+Deduplicate across chunks. Return ONLY valid JSON.

@@ -1,0 +1,18 @@
+Extract action items from the meeting chunk using chain-of-thought reasoning.
+
+Think step by step before emitting JSON:
+1. Scan for explicit commitments ("I will…", "Can you…", "Let's have X do…")
+2. Check for deadlines, dates, or relative times ("by Friday", "next week")
+3. Identify the owner (speaker name or addressed party)
+4. Filter out hypotheticals and passive suggestions
+
+Few-shot example:
+INPUT:
+  Alice: Bob, can you draft the proposal by Thursday?
+  Bob: Sure, I'll send it out Wednesday night.
+OUTPUT:
+{"action_items":[{"owner":"Bob","task":"Draft and send the proposal",
+"due_date":"2026-04-23","confidence":0.95,
+"source_quote":"Bob: Sure, I'll send it out Wednesday night."}]}
+
+Now process the input and return ONLY valid JSON with the same schema.
