@@ -3,18 +3,21 @@
 This module owns every step before the LLM sees a meeting:
   - detect input type
   - extract audio from video via ffmpeg
-  - transcribe audio with faster-whisper
-  - overlay pyannote speaker diarization
+  - transcribe audio with faster-whisper  (GPU-accelerated when available)
+  - overlay pyannote speaker diarization  (GPU-accelerated when available)
   - parse pre-existing transcripts (txt/srt/vtt)
 """
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from pathlib import Path
 
 import ffmpeg
 import pysrt
+import torch
 import webvtt
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
@@ -29,6 +32,8 @@ from config import (
 )
 from src.schemas import Transcript, TranscriptSegment
 
+log = logging.getLogger(__name__)
+
 # ─── File-type detection ───────────────────────────────────────────────────
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
@@ -42,6 +47,34 @@ _SPEAKER_LINE = re.compile(
 # Lazy-loaded model singletons
 _whisper_model: WhisperModel | None = None
 _diarize_pipeline: Pipeline | None = None
+
+
+# ─── GPU / device helpers ──────────────────────────────────────────────────
+def _resolve_device() -> tuple[str, str]:
+    """Decide on (device, compute_type) for Whisper.
+
+    - If ASR_DEVICE is 'cuda' and CUDA is available → ('cuda', 'float16')
+    - If ASR_DEVICE is 'cuda' but no GPU → fallback to CPU with a warning
+    - If ASR_DEVICE is 'auto' → use cuda when available, else cpu
+    - Otherwise honor the configured device and compute type
+    """
+    cuda_ok = torch.cuda.is_available()
+    requested = (ASR_DEVICE or "auto").lower()
+
+    if requested in ("cuda", "gpu"):
+        if cuda_ok:
+            return "cuda", ASR_COMPUTE_TYPE or "float16"
+        print(f"[asr] ⚠️  ASR_DEVICE={requested} requested but no CUDA GPU found "
+              f"— falling back to CPU")
+        return "cpu", "int8"
+
+    if requested == "auto":
+        if cuda_ok:
+            return "cuda", ASR_COMPUTE_TYPE or "float16"
+        return "cpu", ASR_COMPUTE_TYPE or "int8"
+
+    # Explicit CPU (or anything else)
+    return requested, ASR_COMPUTE_TYPE or "int8"
 
 
 # ─── Public API ────────────────────────────────────────────────────────────
@@ -82,6 +115,8 @@ def _extract_audio_from_video(video_path: Path, sample_rate: int = 16000) -> Pat
     """Extract audio as 16kHz mono WAV using ffmpeg."""
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PROCESSED_DIR / f"{video_path.stem}.wav"
+    t0 = time.time()
+    print(f"[ffmpeg] extracting audio: {video_path.name} → {out_path.name}")
     (
         ffmpeg
         .input(str(video_path))
@@ -90,6 +125,8 @@ def _extract_audio_from_video(video_path: Path, sample_rate: int = 16000) -> Pat
         .overwrite_output()
         .run(quiet=True)
     )
+    print(f"[ffmpeg] done ({time.time()-t0:.1f}s)  "
+          f"size={out_path.stat().st_size/1e6:.1f} MB")
     return out_path
 
 
@@ -97,8 +134,14 @@ def _extract_audio_from_video(video_path: Path, sample_rate: int = 16000) -> Pat
 def _get_whisper() -> WhisperModel:
     global _whisper_model
     if _whisper_model is None:
-        _whisper_model = WhisperModel(ASR_MODEL, device=ASR_DEVICE,
-                                      compute_type=ASR_COMPUTE_TYPE)
+        device, compute_type = _resolve_device()
+        print(f"[whisper] loading model={ASR_MODEL!r}  device={device}  "
+              f"compute_type={compute_type}")
+        t0 = time.time()
+        _whisper_model = WhisperModel(
+            ASR_MODEL, device=device, compute_type=compute_type
+        )
+        print(f"[whisper] model ready ({time.time()-t0:.1f}s)")
     return _whisper_model
 
 
@@ -107,9 +150,18 @@ def _get_diarization_pipeline() -> Pipeline:
     if _diarize_pipeline is None:
         if not HF_TOKEN:
             raise RuntimeError("HF_TOKEN not set — required for pyannote.")
+        print(f"[pyannote] loading pipeline={DIARIZATION_MODEL!r}")
+        t0 = time.time()
         _diarize_pipeline = Pipeline.from_pretrained(
             DIARIZATION_MODEL, use_auth_token=HF_TOKEN
         )
+        # Move to GPU if available — pyannote runs on CPU by default
+        if torch.cuda.is_available():
+            _diarize_pipeline.to(torch.device("cuda"))
+            print(f"[pyannote] pipeline moved to CUDA ({time.time()-t0:.1f}s)")
+        else:
+            print(f"[pyannote] running on CPU (no CUDA available) "
+                  f"({time.time()-t0:.1f}s)")
     return _diarize_pipeline
 
 
@@ -120,28 +172,74 @@ def _transcribe_audio(
     source_type: str,
 ) -> Transcript:
     """Whisper ASR, with optional pyannote speaker overlay."""
+    t_start = time.time()
+    file_mb = audio_path.stat().st_size / 1e6
+    print(f"[asr] file={audio_path.name}  size={file_mb:.1f} MB")
+
+    # 1. Load (or reuse) model
     model = _get_whisper()
+
+    # 2. Kick off transcription (generator — doesn't run until iterated)
+    t0 = time.time()
     segments_iter, info = model.transcribe(str(audio_path), beam_size=5)
+    print(f"[asr] language={info.language} (prob={info.language_probability:.2f})  "
+          f"duration={info.duration:.1f}s  (detect {time.time()-t0:.1f}s)")
 
-    segments = [
-        TranscriptSegment(
-            speaker="Speaker ?",
-            start_time=seg.start,
-            end_time=seg.end,
-            text=seg.text.strip(),
+    # 3. Iterate the generator — this is where the heavy lifting actually runs.
+    #    Print progress every ~10 segments or every 30s of audio processed.
+    segments: list[TranscriptSegment] = []
+    t_iter = time.time()
+    last_tick = 0.0
+    for i, seg in enumerate(segments_iter, start=1):
+        segments.append(
+            TranscriptSegment(
+                speaker="Speaker ?",
+                start_time=seg.start,
+                end_time=seg.end,
+                text=seg.text.strip(),
+            )
         )
-        for seg in segments_iter
-    ]
+        if i % 10 == 0 or seg.end - last_tick >= 30:
+            rtf = (time.time() - t_iter) / max(seg.end, 0.01)
+            print(f"[asr]  …seg {i:4d}  audio {seg.end:6.1f}s  "
+                  f"wall {time.time()-t_iter:5.1f}s  rtf={rtf:.2f}x")
+            last_tick = seg.end
 
+    t_asr = time.time() - t_iter
+    speed = info.duration / max(t_asr, 0.01)
+    print(f"[asr] ✅ {len(segments)} segments, {info.duration:.1f}s audio in "
+          f"{t_asr:.1f}s wall ({speed:.1f}x realtime)")
+
+    # 4. Optional diarization
     if diarize:
+        t0 = time.time()
+        print(f"[diarize] running pyannote on {audio_path.name}")
         segments = _attach_speakers(audio_path, segments)
+        n_spk = len({s.speaker for s in segments})
+        print(f"[diarize] ✅ {n_spk} speakers  ({time.time()-t0:.1f}s)")
+    else:
+        print(f"[diarize] skipped (diarize=False)")
+
+    total = time.time() - t_start
+    print(f"[pipeline] total {total:.1f}s for {info.duration:.1f}s audio")
+
+    # Free GPU memory between runs (useful in Streamlit/long sessions)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return Transcript(
         source_path=source_path,
         source_type=source_type,  # type: ignore[arg-type]
         duration_seconds=info.duration,
         segments=segments,
-        metadata={"language": info.language, "asr_model": ASR_MODEL},
+        metadata={
+            "language": info.language,
+            "language_confidence": round(info.language_probability, 3),
+            "asr_model": ASR_MODEL,
+            "asr_wall_seconds": round(t_asr, 2),
+            "total_wall_seconds": round(total, 2),
+            "realtime_factor": round(speed, 2),
+        },
     )
 
 
