@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from google.genai import errors as genai_errors
 
 from src.input_processing import DiarizationAccessError, load_meeting
 from src.report import build_report, render_markdown, save_report
@@ -44,33 +45,54 @@ def main() -> None:
             st.code(str(e))
             st.info("Retrying without diarization…")
             transcript = load_meeting(tmp_path, diarize=False)
+    report = None
+    report_error: str | None = None
     with st.spinner("Summarizing + extracting action items…"):
-        report = build_report(transcript, prompt_version=prompt_version)
+        try:
+            report = build_report(transcript, prompt_version=prompt_version)
+        except genai_errors.ServerError as e:
+            report_error = (
+                f"Gemini is currently unavailable (HTTP {getattr(e, 'code', '5xx')}). "
+                "The model is likely overloaded — try again in a minute, or set "
+                "`LLM_FALLBACK_MODEL` in `.env` to enable automatic fallback."
+            )
+        except genai_errors.ClientError as e:
+            report_error = (
+                f"Gemini rejected the request (HTTP {getattr(e, 'code', '4xx')}): {e}"
+            )
+        except Exception as e:  # noqa: BLE001
+            report_error = f"Report generation failed: {type(e).__name__}: {e}"
 
     tab_summary, tab_actions, tab_transcript = st.tabs(
         ["Summary", "Action Items", "Transcript"]
     )
 
     with tab_summary:
-        st.markdown(render_markdown(report))
+        if report is not None:
+            st.markdown(render_markdown(report))
+        else:
+            st.error(report_error or "Report generation failed.")
+            st.info("Transcript is still available in the **Transcript** tab.")
 
     with tab_actions:
-        if report.action_items:
+        if report is not None and report.action_items:
             df = pd.DataFrame([a.model_dump() for a in report.action_items])
             st.dataframe(df, use_container_width=True)
-        else:
+        elif report is not None:
             st.write("No action items detected.")
+        else:
+            st.error(report_error or "Report generation failed.")
 
     with tab_transcript:
         for seg in transcript.segments:
             st.write(f"**{seg.speaker}** `{seg.start_time:.1f}s`: {seg.text}")
 
-    # Save and offer download
-    paths = save_report(report, stem=tmp_path.stem)
-    st.download_button("Download .md", paths["md"].read_bytes(),
-                       file_name=paths["md"].name)
-    st.download_button("Download .docx", paths["docx"].read_bytes(),
-                       file_name=paths["docx"].name)
+    if report is not None:
+        paths = save_report(report, stem=tmp_path.stem)
+        st.download_button("Download .md", paths["md"].read_bytes(),
+                           file_name=paths["md"].name)
+        st.download_button("Download .docx", paths["docx"].read_bytes(),
+                           file_name=paths["docx"].name)
 
 
 if __name__ == "__main__":

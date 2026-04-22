@@ -84,9 +84,10 @@ def complete(
 ) -> Any:
     """Send a prompt to Gemini and return either a raw string or parsed JSON.
 
-    Retries transient errors (429/5xx) with exponential backoff. If
-    ``LLM_FALLBACK_MODEL`` is set and the primary model still fails after all
-    retries, makes one attempt against the fallback model.
+    Retries transient errors (429/5xx) with exponential backoff, up to
+    ``LLM_MAX_RETRIES`` attempts. If ``LLM_FALLBACK_MODEL`` is set and the
+    primary model still fails with a transient error after exhausting retries,
+    the fallback model is tried with the same retry policy.
     """
     primary = model or LLM_MODEL
     temperature = LLM_TEMPERATURE if temperature is None else temperature
