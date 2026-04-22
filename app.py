@@ -51,7 +51,7 @@ def main() -> None:
     with tab_actions:
         if report.action_items:
             df = pd.DataFrame([a.model_dump() for a in report.action_items])
-            st.dataframe(df, width="stretch")
+            st.dataframe(df, use_container_width=True)
         else:
             st.write("No action items detected.")
 
