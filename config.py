@@ -19,7 +19,6 @@ OUTPUT_DIR: Path = DATA_DIR / "outputs"
 PROMPTS_DIR: Path = ROOT_DIR / "prompts"
 
 # ─── API keys ──────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
 HF_TOKEN: str | None = os.getenv("HF_TOKEN")  # pyannote requires this
 
@@ -30,7 +29,6 @@ ASR_COMPUTE_TYPE: str = os.getenv("ASR_COMPUTE_TYPE", "int8")
 
 DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 
-LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "gemini")  # "gemini" | "anthropic"
 LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
