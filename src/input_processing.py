@@ -18,8 +18,10 @@ from pathlib import Path
 import ffmpeg
 import pysrt
 import torch
+import torchaudio
 import webvtt
 from faster_whisper import WhisperModel
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 from pyannote.audio import Pipeline
 
 from config import (
@@ -145,16 +147,47 @@ def _get_whisper() -> WhisperModel:
     return _whisper_model
 
 
+class DiarizationAccessError(RuntimeError):
+    """Raised when the HF token can't download the pyannote model."""
+
+
+_ACCESS_HELP = (
+    f"Cannot download {DIARIZATION_MODEL!r} from Hugging Face.\n"
+    "This model is gated. To fix:\n"
+    "  1. Accept the user agreement at:\n"
+    f"       https://huggingface.co/{DIARIZATION_MODEL}\n"
+    "       https://huggingface.co/pyannote/segmentation-3.0\n"
+    "     (must be logged in as the same user as your HF_TOKEN)\n"
+    "  2. Use a token with read access to gated repos:\n"
+    "     - classic 'Read' token (easiest), OR\n"
+    "     - fine-grained token with 'Read access to contents of all "
+    "public gated repos you can access' enabled.\n"
+    "  3. Put it in .env as HF_TOKEN=... and restart.\n"
+    "Alternatively, disable diarization in the UI to skip this step."
+)
+
+
 def _get_diarization_pipeline() -> Pipeline:
     global _diarize_pipeline
     if _diarize_pipeline is None:
         if not HF_TOKEN:
-            raise RuntimeError("HF_TOKEN not set — required for pyannote.")
+            raise DiarizationAccessError(
+                "HF_TOKEN not set — required for pyannote diarization.\n"
+                + _ACCESS_HELP
+            )
         print(f"[pyannote] loading pipeline={DIARIZATION_MODEL!r}")
         t0 = time.time()
-        _diarize_pipeline = Pipeline.from_pretrained(
-            DIARIZATION_MODEL, use_auth_token=HF_TOKEN
-        )
+        try:
+            _diarize_pipeline = Pipeline.from_pretrained(
+                DIARIZATION_MODEL, use_auth_token=HF_TOKEN
+            )
+        except (HfHubHTTPError, LocalEntryNotFoundError) as e:
+            raise DiarizationAccessError(_ACCESS_HELP) from e
+
+        if _diarize_pipeline is None:
+            # pyannote returns None when the token is valid but lacks access
+            raise DiarizationAccessError(_ACCESS_HELP)
+
         # Move to GPU if available — pyannote runs on CPU by default
         if torch.cuda.is_available():
             _diarize_pipeline.to(torch.device("cuda"))
@@ -248,7 +281,15 @@ def _attach_speakers(
     segments: list[TranscriptSegment],
 ) -> list[TranscriptSegment]:
     """Run diarization, assign each segment the speaker with max overlap."""
-    diarization = _get_diarization_pipeline()(str(audio_path))
+    # Preload the waveform and pass it as an in-memory tensor. Feeding a file
+    # path makes pyannote re-read chunks via torchaudio.load(frame_offset,
+    # num_frames), which for compressed codecs (mp3/m4a/webm) can return
+    # slightly fewer samples than requested, breaking the batched
+    # torch.vstack inside speaker_diarization.get_embeddings. Passing a
+    # waveform routes through the exact-slice + zero-pad path instead.
+    waveform, sample_rate = _load_mono_waveform(audio_path)
+    pipeline_input = {"waveform": waveform, "sample_rate": sample_rate}
+    diarization = _get_diarization_pipeline()(pipeline_input)
     turns = [
         (turn.start, turn.end, speaker)
         for turn, _, speaker in diarization.itertracks(yield_label=True)
@@ -259,6 +300,21 @@ def _attach_speakers(
         })
         for seg in segments
     ]
+
+
+def _load_mono_waveform(
+    audio_path: Path, target_sr: int = 16000
+) -> tuple[torch.Tensor, int]:
+    """Load audio as a (1, N) float32 mono tensor at ``target_sr``."""
+    waveform, sample_rate = torchaudio.load(str(audio_path))
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    if sample_rate != target_sr:
+        waveform = torchaudio.functional.resample(
+            waveform, sample_rate, target_sr
+        )
+        sample_rate = target_sr
+    return waveform, sample_rate
 
 
 def _best_speaker(

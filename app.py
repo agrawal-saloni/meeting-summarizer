@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from src.input_processing import load_meeting
+from src.input_processing import DiarizationAccessError, load_meeting
 from src.report import build_report, render_markdown, save_report
 
 
@@ -37,7 +37,13 @@ def main() -> None:
         tmp_path = Path(tmp.name)
 
     with st.spinner("Transcribing…"):
-        transcript = load_meeting(tmp_path, diarize=diarize)
+        try:
+            transcript = load_meeting(tmp_path, diarize=diarize)
+        except DiarizationAccessError as e:
+            st.error("Speaker diarization unavailable")
+            st.code(str(e))
+            st.info("Retrying without diarization…")
+            transcript = load_meeting(tmp_path, diarize=False)
     with st.spinner("Summarizing + extracting action items…"):
         report = build_report(transcript, prompt_version=prompt_version)
 
