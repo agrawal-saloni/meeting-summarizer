@@ -10,6 +10,7 @@ from typing import Any
 
 from config import (
     ANTHROPIC_API_KEY,
+    GOOGLE_API_KEY,
     LLM_MAX_TOKENS,
     LLM_MODEL,
     LLM_PROVIDER,
@@ -33,6 +34,8 @@ def complete(
         return _complete_openai(system, user, json_mode, model, temperature)
     if LLM_PROVIDER == "anthropic":
         return _complete_anthropic(system, user, json_mode, model, temperature)
+    if LLM_PROVIDER == "gemini":
+        return _complete_gemini(system, user, json_mode, model, temperature)
     raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER}")
 
 
@@ -72,4 +75,23 @@ def _complete_anthropic(
         messages=[{"role": "user", "content": user}],
     )
     content = msg.content[0].text if msg.content else ""
+    return json.loads(content) if json_mode else content
+
+
+def _complete_gemini(
+    system: str, user: str, json_mode: bool, model: str, temperature: float
+) -> Any:
+    import google.generativeai as genai
+
+    genai.configure(api_key=GOOGLE_API_KEY)
+    client = genai.GenerativeModel(
+        model_name=model,
+        generation_config={
+            "temperature": temperature,
+            "max_output_tokens": LLM_MAX_TOKENS,
+        },
+        system_instruction=system,
+    )
+    response = client.generate_content(user)
+    content = response.text if response.text else ""
     return json.loads(content) if json_mode else content
