@@ -30,8 +30,11 @@ ASR_COMPUTE_TYPE: str = os.getenv("ASR_COMPUTE_TYPE", "int8")
 DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 
 LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+LLM_FALLBACK_MODEL: str | None = os.getenv("LLM_FALLBACK_MODEL") or None
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "5"))
+LLM_RETRY_BASE_DELAY: float = float(os.getenv("LLM_RETRY_BASE_DELAY", "2.0"))
 
 # ─── Chunking ──────────────────────────────────────────────────────────────
 CHUNK_TOKENS: int = 3000
