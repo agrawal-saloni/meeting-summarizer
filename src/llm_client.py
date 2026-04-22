@@ -1,4 +1,4 @@
-"""Unified LLM client — OpenAI and Anthropic behind one `complete()` call.
+"""Unified LLM client — Google Gemini and Anthropic behind one `complete()` call.
 
 Swap providers via config.LLM_PROVIDER without changing caller code.
 """
@@ -15,7 +15,6 @@ from config import (
     LLM_MODEL,
     LLM_PROVIDER,
     LLM_TEMPERATURE,
-    OPENAI_API_KEY,
 )
 
 
@@ -30,35 +29,11 @@ def complete(
     model = model or LLM_MODEL
     temperature = LLM_TEMPERATURE if temperature is None else temperature
 
-    if LLM_PROVIDER == "openai":
-        return _complete_openai(system, user, json_mode, model, temperature)
-    if LLM_PROVIDER == "anthropic":
-        return _complete_anthropic(system, user, json_mode, model, temperature)
     if LLM_PROVIDER == "gemini":
         return _complete_gemini(system, user, json_mode, model, temperature)
+    if LLM_PROVIDER == "anthropic":
+        return _complete_anthropic(system, user, json_mode, model, temperature)
     raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER}")
-
-
-def _complete_openai(
-    system: str, user: str, json_mode: bool, model: str, temperature: float
-) -> Any:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": temperature,
-        "max_tokens": LLM_MAX_TOKENS,
-    }
-    if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
-    resp = client.chat.completions.create(**kwargs)
-    content = resp.choices[0].message.content or ""
-    return json.loads(content) if json_mode else content
 
 
 def _complete_anthropic(
@@ -84,12 +59,16 @@ def _complete_gemini(
     import google.generativeai as genai
 
     genai.configure(api_key=GOOGLE_API_KEY)
+    generation_config: dict[str, Any] = {
+        "temperature": temperature,
+        "max_output_tokens": LLM_MAX_TOKENS,
+    }
+    if json_mode:
+        generation_config["response_mime_type"] = "application/json"
+
     client = genai.GenerativeModel(
         model_name=model,
-        generation_config={
-            "temperature": temperature,
-            "max_output_tokens": LLM_MAX_TOKENS,
-        },
+        generation_config=generation_config,
         system_instruction=system,
     )
     response = client.generate_content(user)
