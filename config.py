@@ -31,6 +31,15 @@ ASR_VAD_FILTER: bool = os.getenv("ASR_VAD_FILTER", "true").lower() in (
     "1", "true", "yes", "on"
 )
 
+# ─── Segment merging ───────────────────────────────────────────────────────
+# After ASR+diarization, glue together consecutive segments from the same
+# speaker so a single utterance shows as one row instead of 4 fragments.
+MERGE_MAX_GAP_SECONDS: float = float(os.getenv("MERGE_MAX_GAP_SECONDS", "1.5"))
+MERGE_MAX_DURATION_SECONDS: float = float(
+    os.getenv("MERGE_MAX_DURATION_SECONDS", "45")
+)
+MERGE_MAX_CHARS: int = int(os.getenv("MERGE_MAX_CHARS", "600"))
+
 DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 
 LLM_MODEL: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")

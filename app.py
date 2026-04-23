@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 from groq import APIStatusError, RateLimitError
 
+from src.analysis import apply_speaker_names, infer_speaker_names
 from src.input_processing import DiarizationAccessError, load_meeting
 from src.report import build_report, render_markdown, save_report
 
@@ -22,6 +23,15 @@ def main() -> None:
         prompt_version = st.selectbox("Prompt version", ["v1", "v2"], index=0)
         diarize = st.checkbox("Run speaker diarization", value=True)
         st.caption("Requires HF_TOKEN for pyannote.")
+        detect_names = st.checkbox(
+            "Try to detect speaker names",
+            value=True,
+            help=(
+                "After diarization, ask the LLM to map Speaker 1/2/… to real "
+                "names by scanning the transcript for self-introductions and "
+                "direct address. Only confident matches are applied."
+            ),
+        )
 
     uploaded = st.file_uploader(
         "Upload meeting (video / audio / transcript)",
@@ -45,6 +55,21 @@ def main() -> None:
             st.code(str(e))
             st.info("Retrying without diarization…")
             transcript = load_meeting(tmp_path, diarize=False)
+
+    if detect_names and any(s.speaker for s in transcript.segments):
+        with st.spinner("Detecting speaker names…"):
+            try:
+                mapping = infer_speaker_names(transcript)
+            except Exception as e:  # noqa: BLE001
+                mapping = {}
+                st.warning(f"Speaker-name detection failed: {e}")
+        if mapping:
+            transcript = apply_speaker_names(transcript, mapping)
+            st.caption(
+                "Identified: "
+                + ", ".join(f"{k} → **{v}**" for k, v in mapping.items())
+            )
+
     report = None
     report_error: str | None = None
     with st.spinner("Summarizing + extracting action items…"):
@@ -87,7 +112,8 @@ def main() -> None:
 
     with tab_transcript:
         for seg in transcript.segments:
-            st.write(f"**{seg.speaker}** `{seg.start_time:.1f}s`: {seg.text}")
+            prefix = f"**{seg.speaker}** " if seg.speaker else ""
+            st.write(f"{prefix}`{seg.start_time:.1f}s`: {seg.text}")
 
     if report is not None:
         paths = save_report(report, stem=tmp_path.stem)

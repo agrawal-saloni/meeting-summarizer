@@ -33,6 +33,9 @@ from config import (
     ASR_VAD_FILTER,
     DIARIZATION_MODEL,
     HF_TOKEN,
+    MERGE_MAX_CHARS,
+    MERGE_MAX_DURATION_SECONDS,
+    MERGE_MAX_GAP_SECONDS,
     PROCESSED_DIR,
 )
 from src.schemas import Transcript, TranscriptSegment
@@ -312,6 +315,25 @@ def _transcribe_audio(
         segments, info, t_asr = _run_asr(audio_path)
         print("[diarize] skipped (diarize=False)")
 
+    # Normalize speaker labels for downstream consumers (UI, LLM, dedupe).
+    # Pyannote ids → "Speaker 1/2/…"; unknown labels (no diarization) →
+    # blank, so the UI doesn't display a meaningless "Speaker ?".
+    segments = _normalize_speaker_labels(segments)
+
+    # Glue together consecutive same-speaker segments so one statement
+    # shows as one row, not 4 fragments. Capped by gap, duration, and chars
+    # to avoid runaway merges (e.g. one speaker monologuing for 10 minutes).
+    pre_merge = len(segments)
+    segments = _merge_consecutive_segments(
+        segments,
+        max_gap=MERGE_MAX_GAP_SECONDS,
+        max_duration=MERGE_MAX_DURATION_SECONDS,
+        max_chars=MERGE_MAX_CHARS,
+    )
+    print(f"[merge] {pre_merge} → {len(segments)} segments "
+          f"(gap≤{MERGE_MAX_GAP_SECONDS}s, dur≤{MERGE_MAX_DURATION_SECONDS}s, "
+          f"chars≤{MERGE_MAX_CHARS})")
+
     total = time.time() - t_start
     speed = info.duration / max(t_asr, 0.01)
     print(f"[pipeline] total {total:.1f}s for {info.duration:.1f}s audio")
@@ -346,6 +368,80 @@ def _merge_speakers(
         })
         for seg in segments
     ]
+
+
+# Labels we treat as "no real speaker info" (case-insensitive).
+_UNKNOWN_SPEAKER_LABELS = {"speaker ?", "unknown", ""}
+
+
+def _normalize_speaker_labels(
+    segments: list[TranscriptSegment],
+) -> list[TranscriptSegment]:
+    """Rewrite raw speaker ids into clean, user-facing labels.
+
+    - If diarization didn't run (every label is unknown / "Speaker ?"),
+      blank the label so the UI just shows the text without a meaningless
+      prefix and the LLM doesn't see a wall of identical tokens.
+    - Otherwise renumber pyannote's "SPEAKER_00", "SPEAKER_01", … to
+      "Speaker 1", "Speaker 2", … in order of first appearance. Keeps any
+      genuinely unknown segments as "Speaker ?".
+    """
+    raw_labels = [s.speaker for s in segments]
+    has_real = any(
+        lbl.strip().lower() not in _UNKNOWN_SPEAKER_LABELS for lbl in raw_labels
+    )
+    if not has_real:
+        return [s.model_copy(update={"speaker": ""}) for s in segments]
+
+    rename: dict[str, str] = {}
+    next_idx = 1
+    for lbl in raw_labels:
+        if lbl in rename:
+            continue
+        if lbl.strip().lower() in _UNKNOWN_SPEAKER_LABELS:
+            rename[lbl] = "Speaker ?"
+        else:
+            rename[lbl] = f"Speaker {next_idx}"
+            next_idx += 1
+    return [s.model_copy(update={"speaker": rename[s.speaker]}) for s in segments]
+
+
+def _merge_consecutive_segments(
+    segments: list[TranscriptSegment],
+    max_gap: float,
+    max_duration: float,
+    max_chars: int,
+) -> list[TranscriptSegment]:
+    """Coalesce adjacent segments from the same speaker into one statement.
+
+    A new segment is appended to the previous one when ALL of the following hold:
+      - same speaker label
+      - gap between previous end and current start ≤ ``max_gap``
+      - merged duration would not exceed ``max_duration``
+      - merged text would not exceed ``max_chars``
+
+    Otherwise, the current segment starts a new group. This produces clean
+    paragraph-level rows for the UI while still breaking long monologues.
+    """
+    if not segments:
+        return segments
+
+    out: list[TranscriptSegment] = [segments[0]]
+    for seg in segments[1:]:
+        prev = out[-1]
+        same_speaker = prev.speaker == seg.speaker
+        small_gap = (seg.start_time - prev.end_time) <= max_gap
+        within_duration = (seg.end_time - prev.start_time) <= max_duration
+        within_chars = (len(prev.text) + 1 + len(seg.text)) <= max_chars
+
+        if same_speaker and small_gap and within_duration and within_chars:
+            out[-1] = prev.model_copy(update={
+                "end_time": seg.end_time,
+                "text": f"{prev.text.rstrip()} {seg.text.lstrip()}".strip(),
+            })
+        else:
+            out.append(seg)
+    return out
 
 
 def _load_mono_waveform(

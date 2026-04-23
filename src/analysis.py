@@ -20,40 +20,13 @@ def count_tokens(text: str) -> int:
     return len(_encoding.encode(text))
 
 
-# Pyannote labels we treat as "no real speaker info"
-_UNKNOWN_SPEAKER_LABELS = {"speaker ?", "unknown", ""}
-
-
 def segments_to_text(segments: list[TranscriptSegment]) -> str:
-    """Render segments for the LLM, normalizing speaker labels.
-
-    - If diarization didn't run (every label is "Speaker ?" or similar),
-      drop the label entirely so the LLM doesn't see a wall of meaningless
-      tokens. This keeps the diarized vs. non-diarized prompt shape similar
-      and stops the model from emitting one fragmented action item per line.
-    - If diarization did run, renumber raw pyannote ids ("SPEAKER_00", etc.)
-      to friendly "Speaker 1 / Speaker 2 / ..." in order of first appearance.
-      Friendly labels also flow into the LLM's `owner` field, which makes
-      downstream dedupe across chunks more aggressive (and consistent).
-    """
-    raw_labels = [s.speaker for s in segments]
-    informative = [
-        lbl for lbl in raw_labels if lbl.strip().lower() not in _UNKNOWN_SPEAKER_LABELS
-    ]
-    if not informative:
-        return "\n".join(s.text for s in segments)
-
-    rename: dict[str, str] = {}
-    next_idx = 1
-    for lbl in raw_labels:
-        if lbl in rename:
-            continue
-        if lbl.strip().lower() in _UNKNOWN_SPEAKER_LABELS:
-            rename[lbl] = "Speaker ?"
-        else:
-            rename[lbl] = f"Speaker {next_idx}"
-            next_idx += 1
-    return "\n".join(f"{rename[s.speaker]}: {s.text}" for s in segments)
+    """Render segments for the LLM. Speaker labels are already normalized
+    upstream by `_normalize_speaker_labels` in input_processing — empty
+    speaker means no diarization, so we just emit the text."""
+    return "\n".join(
+        s.text if not s.speaker else f"{s.speaker}: {s.text}" for s in segments
+    )
 
 
 def chunk_segments(
@@ -138,6 +111,78 @@ def extract_action_items(
         for item in result.get("action_items", []):
             all_items.append(ActionItem(**item))
     return _dedupe(all_items)
+
+
+# ─── Speaker name inference ────────────────────────────────────────────────
+_NAME_INFERENCE_PROMPT = """\
+You are analyzing a meeting transcript where speakers are labeled
+"Speaker 1", "Speaker 2", … by an automatic diarization system.
+
+Your job: determine the real first name of each speaker WHEN possible, by
+looking for evidence in the transcript. Strong evidence includes:
+  - Self-introductions ("Hi, I'm Alice.", "This is Bob.", "Alice here.")
+  - Other people addressing them by name ("Bob, can you draft that?",
+    "Thanks, Carol.", "I agree with Alice.")
+  - Sign-offs that reveal identity
+
+Rules:
+- Only assign a name when the evidence is unambiguous (ideally 2+ references).
+- If you are not confident, return null for that speaker — DO NOT GUESS.
+- Use just the first name (no titles, no surnames) unless the surname is
+  the only consistent reference.
+- The same name must NOT be assigned to two different speakers.
+
+Respond with a single valid JSON object whose keys are the speaker labels
+present in the transcript, mapping each to a name string or null:
+{"Speaker 1": "Alice", "Speaker 2": null, ...}
+"""
+
+
+def infer_speaker_names(transcript: Transcript) -> dict[str, str]:
+    """Ask the LLM to map "Speaker N" labels to real names where possible.
+
+    Returns a partial mapping: only speakers the LLM is confident about are
+    included. Speakers without identified names are omitted (so callers can
+    leave their labels untouched).
+    """
+    speaker_labels = sorted({s.speaker for s in transcript.segments if s.speaker})
+    if len(speaker_labels) < 1:
+        return {}
+
+    text = segments_to_text(transcript.segments)
+    user = f"Speakers in this transcript: {', '.join(speaker_labels)}\n\n{text}"
+    raw = complete(
+        system=_NAME_INFERENCE_PROMPT,
+        user=user,
+        json_mode=True,
+        temperature=0.0,
+    )
+
+    mapping: dict[str, str] = {}
+    seen_names: set[str] = set()
+    for label in speaker_labels:
+        name = raw.get(label)
+        if not isinstance(name, str):
+            continue
+        clean = name.strip()
+        if not clean or clean.lower() in seen_names:
+            continue
+        mapping[label] = clean
+        seen_names.add(clean.lower())
+    return mapping
+
+
+def apply_speaker_names(
+    transcript: Transcript, mapping: dict[str, str]
+) -> Transcript:
+    """Return a copy of ``transcript`` with speaker labels rewritten in-place."""
+    if not mapping:
+        return transcript
+    new_segments = [
+        seg.model_copy(update={"speaker": mapping.get(seg.speaker, seg.speaker)})
+        for seg in transcript.segments
+    ]
+    return transcript.model_copy(update={"segments": new_segments})
 
 
 def _dedupe(items: list[ActionItem]) -> list[ActionItem]:
