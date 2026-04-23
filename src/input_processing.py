@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import ffmpeg
@@ -79,6 +80,20 @@ def _resolve_device() -> tuple[str, str]:
 
     # Explicit CPU (or anything else)
     return requested, ASR_COMPUTE_TYPE or "int8"
+
+
+def _resolve_torch_device() -> torch.device:
+    """Pick the best PyTorch device for pyannote (CUDA → MPS → CPU).
+
+    Note: faster-whisper uses CTranslate2, which does NOT support Apple MPS,
+    so Whisper still runs on CPU on Macs. Pyannote, being plain PyTorch,
+    can use MPS for a large speedup on Apple Silicon.
+    """
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 # ─── Public API ────────────────────────────────────────────────────────────
@@ -190,31 +205,26 @@ def _get_diarization_pipeline() -> Pipeline:
             # pyannote returns None when the token is valid but lacks access
             raise DiarizationAccessError(_ACCESS_HELP)
 
-        # Move to GPU if available — pyannote runs on CPU by default
-        if torch.cuda.is_available():
-            _diarize_pipeline.to(torch.device("cuda"))
-            print(f"[pyannote] pipeline moved to CUDA ({time.time()-t0:.1f}s)")
-        else:
-            print(f"[pyannote] running on CPU (no CUDA available) "
+        # Pyannote defaults to CPU. Move to the best available accelerator
+        # (CUDA on Linux/Windows, MPS/Metal on Apple Silicon).
+        device = _resolve_torch_device()
+        try:
+            _diarize_pipeline.to(device)
+            print(f"[pyannote] pipeline moved to {device.type.upper()} "
                   f"({time.time()-t0:.1f}s)")
+        except (RuntimeError, NotImplementedError) as e:
+            # Some pyannote ops occasionally lack MPS kernels — fall back gracefully.
+            print(f"[pyannote] ⚠️  could not use {device.type.upper()} ({e}); "
+                  f"falling back to CPU")
+            _diarize_pipeline.to(torch.device("cpu"))
     return _diarize_pipeline
 
 
-def _transcribe_audio(
+def _run_asr(
     audio_path: Path,
-    diarize: bool,
-    source_path: str,
-    source_type: str,
-) -> Transcript:
-    """Whisper ASR, with optional pyannote speaker overlay."""
-    t_start = time.time()
-    file_mb = audio_path.stat().st_size / 1e6
-    print(f"[asr] file={audio_path.name}  size={file_mb:.1f} MB")
-
-    # 1. Load (or reuse) model
+) -> tuple[list[TranscriptSegment], "object", float]:
+    """Run faster-whisper end-to-end and return (segments, info, asr_wall_seconds)."""
     model = _get_whisper()
-
-    # 2. Kick off transcription (generator — doesn't run until iterated)
     t0 = time.time()
     segments_iter, info = model.transcribe(
         str(audio_path),
@@ -225,8 +235,6 @@ def _transcribe_audio(
           f"duration={info.duration:.1f}s  beam={ASR_BEAM_SIZE}  "
           f"vad={ASR_VAD_FILTER}  (detect {time.time()-t0:.1f}s)")
 
-    # 3. Iterate the generator — this is where the heavy lifting actually runs.
-    #    Print progress every ~10 segments or every 30s of audio processed.
     segments: list[TranscriptSegment] = []
     t_iter = time.time()
     last_tick = 0.0
@@ -249,21 +257,65 @@ def _transcribe_audio(
     speed = info.duration / max(t_asr, 0.01)
     print(f"[asr] ✅ {len(segments)} segments, {info.duration:.1f}s audio in "
           f"{t_asr:.1f}s wall ({speed:.1f}x realtime)")
+    return segments, info, t_asr
 
-    # 4. Optional diarization
+
+def _run_diarization(audio_path: Path) -> list[tuple[float, float, str]]:
+    """Run pyannote diarization and return a list of (start, end, speaker) turns."""
+    t0 = time.time()
+    print(f"[diarize] running pyannote on {audio_path.name}")
+    # See `_attach_speakers` history: pass an in-memory waveform to avoid
+    # codec-related sample-count mismatches in pyannote's chunked reader.
+    waveform, sample_rate = _load_mono_waveform(audio_path)
+    diarization = _get_diarization_pipeline()(
+        {"waveform": waveform, "sample_rate": sample_rate}
+    )
+    turns = [
+        (turn.start, turn.end, speaker)
+        for turn, _, speaker in diarization.itertracks(yield_label=True)
+    ]
+    n_spk = len({spk for _, _, spk in turns})
+    print(f"[diarize] ✅ {n_spk} speakers, {len(turns)} turns "
+          f"({time.time()-t0:.1f}s)")
+    return turns
+
+
+def _transcribe_audio(
+    audio_path: Path,
+    diarize: bool,
+    source_path: str,
+    source_type: str,
+) -> Transcript:
+    """Whisper ASR + optional pyannote diarization, run concurrently when both apply."""
+    t_start = time.time()
+    file_mb = audio_path.stat().st_size / 1e6
+    print(f"[asr] file={audio_path.name}  size={file_mb:.1f} MB")
+
+    # Pre-warm models in the foreground so concurrent threads don't race on
+    # the lazy-init singletons (and so model-load logs aren't interleaved).
+    _get_whisper()
     if diarize:
-        t0 = time.time()
-        print(f"[diarize] running pyannote on {audio_path.name}")
-        segments = _attach_speakers(audio_path, segments)
-        n_spk = len({s.speaker for s in segments})
-        print(f"[diarize] ✅ {n_spk} speakers  ({time.time()-t0:.1f}s)")
+        _get_diarization_pipeline()
+
+    if diarize:
+        # Whisper runs on CPU (CTranslate2) and pyannote on MPS/CUDA when
+        # available, so the two largely use disjoint hardware. Even on pure
+        # CPU, both libs release the GIL during inference, so threading wins.
+        print("[pipeline] running ASR + diarization concurrently")
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="meet") as ex:
+            asr_future = ex.submit(_run_asr, audio_path)
+            diar_future = ex.submit(_run_diarization, audio_path)
+            segments, info, t_asr = asr_future.result()
+            turns = diar_future.result()
+        segments = _merge_speakers(segments, turns)
     else:
-        print(f"[diarize] skipped (diarize=False)")
+        segments, info, t_asr = _run_asr(audio_path)
+        print("[diarize] skipped (diarize=False)")
 
     total = time.time() - t_start
+    speed = info.duration / max(t_asr, 0.01)
     print(f"[pipeline] total {total:.1f}s for {info.duration:.1f}s audio")
 
-    # Free GPU memory between runs (useful in Streamlit/long sessions)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -283,24 +335,11 @@ def _transcribe_audio(
     )
 
 
-def _attach_speakers(
-    audio_path: Path,
+def _merge_speakers(
     segments: list[TranscriptSegment],
+    turns: list[tuple[float, float, str]],
 ) -> list[TranscriptSegment]:
-    """Run diarization, assign each segment the speaker with max overlap."""
-    # Preload the waveform and pass it as an in-memory tensor. Feeding a file
-    # path makes pyannote re-read chunks via torchaudio.load(frame_offset,
-    # num_frames), which for compressed codecs (mp3/m4a/webm) can return
-    # slightly fewer samples than requested, breaking the batched
-    # torch.vstack inside speaker_diarization.get_embeddings. Passing a
-    # waveform routes through the exact-slice + zero-pad path instead.
-    waveform, sample_rate = _load_mono_waveform(audio_path)
-    pipeline_input = {"waveform": waveform, "sample_rate": sample_rate}
-    diarization = _get_diarization_pipeline()(pipeline_input)
-    turns = [
-        (turn.start, turn.end, speaker)
-        for turn, _, speaker in diarization.itertracks(yield_label=True)
-    ]
+    """Assign each ASR segment the diarization speaker with maximum overlap."""
     return [
         seg.model_copy(update={
             "speaker": _best_speaker(seg.start_time, seg.end_time, turns)
