@@ -20,8 +20,40 @@ def count_tokens(text: str) -> int:
     return len(_encoding.encode(text))
 
 
+# Pyannote labels we treat as "no real speaker info"
+_UNKNOWN_SPEAKER_LABELS = {"speaker ?", "unknown", ""}
+
+
 def segments_to_text(segments: list[TranscriptSegment]) -> str:
-    return "\n".join(f"{s.speaker}: {s.text}" for s in segments)
+    """Render segments for the LLM, normalizing speaker labels.
+
+    - If diarization didn't run (every label is "Speaker ?" or similar),
+      drop the label entirely so the LLM doesn't see a wall of meaningless
+      tokens. This keeps the diarized vs. non-diarized prompt shape similar
+      and stops the model from emitting one fragmented action item per line.
+    - If diarization did run, renumber raw pyannote ids ("SPEAKER_00", etc.)
+      to friendly "Speaker 1 / Speaker 2 / ..." in order of first appearance.
+      Friendly labels also flow into the LLM's `owner` field, which makes
+      downstream dedupe across chunks more aggressive (and consistent).
+    """
+    raw_labels = [s.speaker for s in segments]
+    informative = [
+        lbl for lbl in raw_labels if lbl.strip().lower() not in _UNKNOWN_SPEAKER_LABELS
+    ]
+    if not informative:
+        return "\n".join(s.text for s in segments)
+
+    rename: dict[str, str] = {}
+    next_idx = 1
+    for lbl in raw_labels:
+        if lbl in rename:
+            continue
+        if lbl.strip().lower() in _UNKNOWN_SPEAKER_LABELS:
+            rename[lbl] = "Speaker ?"
+        else:
+            rename[lbl] = f"Speaker {next_idx}"
+            next_idx += 1
+    return "\n".join(f"{rename[s.speaker]}: {s.text}" for s in segments)
 
 
 def chunk_segments(
@@ -70,13 +102,19 @@ def summarize(
     reduce_prompt = _load_prompt(f"summarize_reduce_{prompt_version}.txt")
 
     chunk_summaries = [
-        complete(system=map_prompt, user=segments_to_text(chunk), json_mode=False)
+        complete(
+            system=map_prompt,
+            user=segments_to_text(chunk),
+            json_mode=False,
+            temperature=0.0,
+        )
         for chunk in chunks
     ]
     final = complete(
         system=reduce_prompt,
         user="\n\n---\n\n".join(chunk_summaries),
         json_mode=True,
+        temperature=0.0,
     )
     return MeetingSummary(**final)
 
@@ -92,7 +130,10 @@ def extract_action_items(
     all_items: list[ActionItem] = []
     for chunk in chunks:
         result = complete(
-            system=prompt, user=segments_to_text(chunk), json_mode=True
+            system=prompt,
+            user=segments_to_text(chunk),
+            json_mode=True,
+            temperature=0.0,
         )
         for item in result.get("action_items", []):
             all_items.append(ActionItem(**item))
