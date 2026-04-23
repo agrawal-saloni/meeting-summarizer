@@ -294,16 +294,29 @@ def infer_speaker_names(transcript: Transcript) -> dict[str, str]:
     evidence = _collect_evidence(transcript.segments)
 
     shortcut = _resolve_unambiguous(speaker_labels, evidence)
-    if shortcut is not None:
-        print(
-            f"[speaker-names] regex shortcut resolved {len(shortcut)}/"
-            f"{len(speaker_labels)} speakers, skipping LLM"
-        )
+    has_vocative_evidence = any(ev.addressed_as for ev in evidence.values())
+
+    # Take the shortcut only when it actually resolved someone, OR when
+    # there's no evidence of any kind (including vocatives) for the LLM
+    # to work with. An empty shortcut with vocative evidence present is
+    # "insufficient regex evidence", not "resolved" — defer to the LLM.
+    if shortcut is not None and (shortcut or not has_vocative_evidence):
+        if shortcut:
+            print(
+                f"[speaker-names] regex resolved {len(shortcut)}/"
+                f"{len(speaker_labels)} speakers via self-intros, skipping LLM"
+            )
+        else:
+            print(
+                f"[speaker-names] no evidence found for "
+                f"{len(speaker_labels)} speakers, skipping LLM"
+            )
         return shortcut
 
     bundle = _format_bundle(speaker_labels, evidence)
+    reason = "ambiguous self-intros" if shortcut is None else "vocatives only"
     print(
-        f"[speaker-names] evidence ambiguous → calling {SPEAKER_NAME_MODEL} "
+        f"[speaker-names] regex {reason} → calling {SPEAKER_NAME_MODEL} "
         f"with {len(bundle)}-byte bundle ({len(speaker_labels)} speakers)"
     )
     raw = complete(

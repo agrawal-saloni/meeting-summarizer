@@ -214,6 +214,42 @@ class TestInferSpeakerNames:
             assert infer_speaker_names(t) == {}
         mock_complete.assert_not_called()
 
+    def test_no_self_intros_but_vocatives_defers_to_llm(self) -> None:
+        # No speaker self-introduces, but "Thanks, Alice" / "Bob, can you..."
+        # vocatives exist. The regex alone can't safely assign these, so we
+        # should call the LLM rather than silently returning {}.
+        t = _transcript([
+            _seg("Speaker 1", "Let's get started."),
+            _seg("Speaker 2", "Thanks, Alice."),
+            _seg("Speaker 1", "Sure."),
+            _seg("Speaker 2", "Bob, can you own that?"),
+            _seg("Speaker 3", "Yep, I'll take it."),
+        ])
+        with patch(
+            "src.speaker_names.complete",
+            return_value={"Speaker 1": "Alice", "Speaker 3": "Bob"},
+        ) as mock_complete:
+            mapping = infer_speaker_names(t)
+
+        mock_complete.assert_called_once()
+        kwargs = mock_complete.call_args.kwargs
+        assert kwargs["model"] == "llama-3.1-8b-instant"
+        assert "Addressed by others" in kwargs["user"]
+        assert mapping == {"Speaker 1": "Alice", "Speaker 3": "Bob"}
+
+    def test_truly_no_evidence_still_skips_llm(self) -> None:
+        # No self-intros AND no vocatives → nothing for the LLM to work
+        # with, so don't bother calling it.
+        t = _transcript([
+            _seg("Speaker 1", "Yeah."),
+            _seg("Speaker 2", "Okay."),
+            _seg("Speaker 1", "Sounds good."),
+        ])
+        with patch("src.speaker_names.complete") as mock_complete:
+            mapping = infer_speaker_names(t)
+        mock_complete.assert_not_called()
+        assert mapping == {}
+
 
 # ─── apply_speaker_names ───────────────────────────────────────────────────
 class TestApplyMapping:
