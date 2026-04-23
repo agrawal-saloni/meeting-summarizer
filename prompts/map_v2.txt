@@ -1,0 +1,34 @@
+Analyze ONE chunk of a meeting transcript. In a single JSON response,
+produce both a concise summary and a list of action items.
+
+Think step by step before emitting JSON:
+  1. What decisions were made?
+  2. What commitments or follow-ups were declared (and by whom)?
+  3. What was discussed but left unresolved?
+
+Summary style: terse executive-brief, active voice, 3-5 sentences, attribute
+decisions to speakers. Summarize facts only — do not infer or embellish.
+
+Action-item rules:
+  - Explicit commitments only (tasks, deadlines, or assigned follow-ups).
+  - "source_quote" is verbatim from the input.
+  - Skip hypotheticals, passive suggestions, and unassigned musings.
+
+Few-shot example
+INPUT:
+  Alice: I think we should ship the beta next Friday.
+  Bob: Agreed, assuming QA signs off.
+  Alice: Bob, can you draft the release notes by Thursday?
+  Bob: Sure, I'll send them out Wednesday night.
+OUTPUT:
+{"chunk_summary":"Alice proposed shipping the beta next Friday pending QA sign-off, and Bob agreed. Alice asked Bob to draft release notes by Thursday; Bob committed to sending them Wednesday night.","action_items":[{"owner":"Bob","task":"Draft and send the release notes","due_date":null,"confidence":0.9,"source_quote":"Bob: Sure, I'll send them out Wednesday night."}]}
+
+Schema (exact):
+{
+  "chunk_summary": "…",
+  "action_items": [
+    {"owner":"…","task":"…","due_date":"YYYY-MM-DD or null","confidence":0.0,"source_quote":"…"}
+  ]
+}
+
+Return ONLY valid JSON.

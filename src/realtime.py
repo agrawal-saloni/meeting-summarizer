@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Iterator
 
 from config import LLM_MODEL, REALTIME_WINDOW_SECONDS
-from src.analysis import extract_action_items, summarize
+from src.analysis import analyze
 from src.schemas import MeetingReport, Transcript
 
 
@@ -31,10 +31,11 @@ def stream_report(
             continue
         partial = transcript.model_copy(update={"segments": partial_segments})
 
+        summary, action_items = analyze(partial, prompt_version=prompt_version)
         yield MeetingReport(
             transcript=partial,
-            summary=summarize(partial, prompt_version=prompt_version),
-            action_items=extract_action_items(partial, prompt_version=prompt_version),
+            summary=summary,
+            action_items=action_items,
             generated_at=datetime.utcnow().isoformat(),
             prompt_version=prompt_version,
             llm_model=LLM_MODEL,

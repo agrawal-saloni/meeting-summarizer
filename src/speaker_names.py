@@ -20,8 +20,6 @@ Strategy (cheap → expensive):
 
 from __future__ import annotations
 
-import json
-import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -29,8 +27,6 @@ from dataclasses import dataclass, field
 from config import SPEAKER_NAME_MODEL
 from src.llm_client import complete
 from src.schemas import Transcript, TranscriptSegment
-
-log = logging.getLogger(__name__)
 
 # ─── Name token + stop-word filtering ──────────────────────────────────────
 # A "name candidate" is a single Capitalized word, 2–15 letters. We
@@ -299,18 +295,16 @@ def infer_speaker_names(transcript: Transcript) -> dict[str, str]:
 
     shortcut = _resolve_unambiguous(speaker_labels, evidence)
     if shortcut is not None:
-        log.info(
-            "[speaker-names] regex shortcut resolved %d/%d speakers, no LLM call",
-            len(shortcut),
-            len(speaker_labels),
+        print(
+            f"[speaker-names] regex shortcut resolved {len(shortcut)}/"
+            f"{len(speaker_labels)} speakers, skipping LLM"
         )
         return shortcut
 
     bundle = _format_bundle(speaker_labels, evidence)
-    log.info(
-        "[speaker-names] evidence ambiguous, calling %s with %d-byte bundle",
-        SPEAKER_NAME_MODEL,
-        len(bundle),
+    print(
+        f"[speaker-names] evidence ambiguous → calling {SPEAKER_NAME_MODEL} "
+        f"with {len(bundle)}-byte bundle ({len(speaker_labels)} speakers)"
     )
     raw = complete(
         system=_LLM_PROMPT,

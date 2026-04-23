@@ -11,7 +11,7 @@ from pathlib import Path
 from docx import Document
 
 from config import LLM_MODEL, OUTPUT_DIR
-from src.analysis import extract_action_items, summarize
+from src.analysis import analyze
 from src.schemas import MeetingReport, Transcript
 
 
@@ -19,11 +19,16 @@ from src.schemas import MeetingReport, Transcript
 def build_report(
     transcript: Transcript, prompt_version: str = "v1"
 ) -> MeetingReport:
-    """Run summarization + extraction and bundle into a MeetingReport."""
+    """Run summarization + extraction and bundle into a MeetingReport.
+
+    Uses the fused single-pass ``analyze`` so the transcript is only sent
+    to the map model once (instead of once per task).
+    """
+    summary, action_items = analyze(transcript, prompt_version=prompt_version)
     return MeetingReport(
         transcript=transcript,
-        summary=summarize(transcript, prompt_version=prompt_version),
-        action_items=extract_action_items(transcript, prompt_version=prompt_version),
+        summary=summary,
+        action_items=action_items,
         generated_at=datetime.utcnow().isoformat(),
         prompt_version=prompt_version,
         llm_model=LLM_MODEL,

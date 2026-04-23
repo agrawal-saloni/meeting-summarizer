@@ -53,6 +53,12 @@ LLM_FALLBACK_MODEL: str | None = (
 SPEAKER_NAME_MODEL: str = (
     os.getenv("SPEAKER_NAME_MODEL") or "llama-3.1-8b-instant"
 )
+# Map/reduce split for summarize + extract_action_items: the per-chunk MAP
+# step is straightforward extraction/condensation and runs well on the 8B
+# model, while the REDUCE step benefits from 70B's synthesis quality.
+# Keeping MAP off the 70B saves the majority of the daily TPD budget.
+MAP_MODEL: str = os.getenv("MAP_MODEL") or "llama-3.1-8b-instant"
+REDUCE_MODEL: str = os.getenv("REDUCE_MODEL") or LLM_MODEL
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
