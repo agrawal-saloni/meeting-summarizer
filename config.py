@@ -23,9 +23,13 @@ GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 HF_TOKEN: str | None = os.getenv("HF_TOKEN")  # pyannote requires this
 
 # ─── Model defaults ────────────────────────────────────────────────────────
-ASR_MODEL: str = os.getenv("ASR_MODEL", "large-v3")
+ASR_MODEL: str = os.getenv("ASR_MODEL", "distil-large-v3")
 ASR_DEVICE: str = os.getenv("ASR_DEVICE", "auto")  # auto-detect GPU
 ASR_COMPUTE_TYPE: str = os.getenv("ASR_COMPUTE_TYPE", "int8")
+ASR_BEAM_SIZE: int = int(os.getenv("ASR_BEAM_SIZE", "1"))
+ASR_VAD_FILTER: bool = os.getenv("ASR_VAD_FILTER", "true").lower() in (
+    "1", "true", "yes", "on"
+)
 
 DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 

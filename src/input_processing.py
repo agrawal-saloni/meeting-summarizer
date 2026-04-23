@@ -25,9 +25,11 @@ from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 from pyannote.audio import Pipeline
 
 from config import (
+    ASR_BEAM_SIZE,
     ASR_COMPUTE_TYPE,
     ASR_DEVICE,
     ASR_MODEL,
+    ASR_VAD_FILTER,
     DIARIZATION_MODEL,
     HF_TOKEN,
     PROCESSED_DIR,
@@ -214,9 +216,14 @@ def _transcribe_audio(
 
     # 2. Kick off transcription (generator — doesn't run until iterated)
     t0 = time.time()
-    segments_iter, info = model.transcribe(str(audio_path), beam_size=5)
+    segments_iter, info = model.transcribe(
+        str(audio_path),
+        beam_size=ASR_BEAM_SIZE,
+        vad_filter=ASR_VAD_FILTER,
+    )
     print(f"[asr] language={info.language} (prob={info.language_probability:.2f})  "
-          f"duration={info.duration:.1f}s  (detect {time.time()-t0:.1f}s)")
+          f"duration={info.duration:.1f}s  beam={ASR_BEAM_SIZE}  "
+          f"vad={ASR_VAD_FILTER}  (detect {time.time()-t0:.1f}s)")
 
     # 3. Iterate the generator — this is where the heavy lifting actually runs.
     #    Print progress every ~10 segments or every 30s of audio processed.
