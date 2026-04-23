@@ -35,7 +35,7 @@ LLM_FALLBACK_MODEL: str | None = (
 )
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
-LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "10"))
+LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
 LLM_RETRY_BASE_DELAY: float = float(os.getenv("LLM_RETRY_BASE_DELAY", "2.0"))
 
 # ─── Chunking ──────────────────────────────────────────────────────────────
