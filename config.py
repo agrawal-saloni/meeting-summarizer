@@ -19,7 +19,7 @@ OUTPUT_DIR: Path = DATA_DIR / "outputs"
 PROMPTS_DIR: Path = ROOT_DIR / "prompts"
 
 # ─── API keys ──────────────────────────────────────────────────────────────
-GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
+GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 HF_TOKEN: str | None = os.getenv("HF_TOKEN")  # pyannote requires this
 
 # ─── Model defaults ────────────────────────────────────────────────────────
@@ -29,8 +29,10 @@ ASR_COMPUTE_TYPE: str = os.getenv("ASR_COMPUTE_TYPE", "int8")
 
 DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 
-LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-2.5-flash")
-LLM_FALLBACK_MODEL: str | None = os.getenv("LLM_FALLBACK_MODEL") or None
+LLM_MODEL: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_FALLBACK_MODEL: str | None = (
+    os.getenv("LLM_FALLBACK_MODEL") or "llama-3.1-8b-instant"
+)
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "10"))

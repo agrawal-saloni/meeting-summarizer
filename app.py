@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from google.genai import errors as genai_errors
+from groq import APIStatusError, RateLimitError
 
 from src.input_processing import DiarizationAccessError, load_meeting
 from src.report import build_report, render_markdown, save_report
@@ -50,15 +50,17 @@ def main() -> None:
     with st.spinner("Summarizing + extracting action items…"):
         try:
             report = build_report(transcript, prompt_version=prompt_version)
-        except genai_errors.ServerError as e:
+        except RateLimitError as e:
             report_error = (
-                f"Gemini is currently unavailable (HTTP {getattr(e, 'code', '5xx')}). "
-                "The model is likely overloaded — try again in a minute, or set "
-                "`LLM_FALLBACK_MODEL` in `.env` to enable automatic fallback."
+                "Groq rate limit hit. Wait a minute and retry, or set "
+                "`LLM_FALLBACK_MODEL` in `.env` to switch to a smaller model."
+                f"\n\nDetails: {e}"
             )
-        except genai_errors.ClientError as e:
+        except APIStatusError as e:
+            status = getattr(e, "status_code", "?")
             report_error = (
-                f"Gemini rejected the request (HTTP {getattr(e, 'code', '4xx')}): {e}"
+                f"Groq API error (HTTP {status}): {e}. "
+                "Check your `GROQ_API_KEY` and selected `LLM_MODEL`."
             )
         except Exception as e:  # noqa: BLE001
             report_error = f"Report generation failed: {type(e).__name__}: {e}"
