@@ -9,9 +9,9 @@ import pandas as pd
 import streamlit as st
 from groq import APIStatusError, RateLimitError
 
-from src.analysis import apply_speaker_names, infer_speaker_names
 from src.input_processing import DiarizationAccessError, load_meeting
 from src.report import build_report, render_markdown, save_report
+from src.speaker_names import apply_speaker_names, infer_speaker_names
 
 
 def main() -> None:

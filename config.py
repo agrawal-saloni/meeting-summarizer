@@ -46,6 +46,13 @@ LLM_MODEL: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 LLM_FALLBACK_MODEL: str | None = (
     os.getenv("LLM_FALLBACK_MODEL") or "llama-3.1-8b-instant"
 )
+# Speaker-name detection is a small extraction task — route it to the cheaper
+# 8B model by default so it doesn't eat the 70B token-per-day budget. Override
+# with SPEAKER_NAME_MODEL=<slug>, or set to "" / the same value as LLM_MODEL
+# to keep it on the primary model.
+SPEAKER_NAME_MODEL: str = (
+    os.getenv("SPEAKER_NAME_MODEL") or "llama-3.1-8b-instant"
+)
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
