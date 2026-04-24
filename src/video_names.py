@@ -66,7 +66,28 @@ def _get_reader() -> object | None:
     try:
         _reader = easyocr.Reader(langs, gpu=False, verbose=False)
     except Exception as e:  # noqa: BLE001
+        # Most commonly the first-run weight download fails behind a proxy
+        # (WRONG_VERSION_NUMBER / cert errors) or offline. EasyOCR reuses
+        # any weights already sitting in ~/.EasyOCR/model/, so we can sidestep
+        # its CDN entirely — point the user at that workaround.
+        msg = str(e).lower()
+        looks_networky = any(
+            s in msg for s in ("ssl", "urlopen", "urllib", "connection",
+                               "timed out", "unreachable", "download")
+        )
         print(f"[video-names] EasyOCR init failed ({e}); disabling OCR.")
+        if looks_networky:
+            print(
+                "[video-names] ↳ looks like a model-download problem. "
+                "Pre-fetch the weights from GitHub and drop them in "
+                "~/.EasyOCR/model/ to bypass EasyOCR's CDN:\n"
+                "  mkdir -p ~/.EasyOCR/model && cd ~/.EasyOCR/model && \\\n"
+                "    curl -fLO https://github.com/JaidedAI/EasyOCR/"
+                "releases/download/pre-v1.1.6/craft_mlt_25k.zip && \\\n"
+                "    curl -fLO https://github.com/JaidedAI/EasyOCR/"
+                "releases/download/v1.3/english_g2.zip && \\\n"
+                "    unzip -o craft_mlt_25k.zip && unzip -o english_g2.zip"
+            )
         _reader_unavailable = True
         return None
     print(f"[video-names] reader ready ({time.time() - t0:.1f}s)")
