@@ -42,23 +42,49 @@ MERGE_MAX_CHARS: int = int(os.getenv("MERGE_MAX_CHARS", "600"))
 
 DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 
-# ─── On-screen name extraction (video only) ────────────────────────────────
-# When the input is a video, we can OCR sampled frames to harvest real
-# participant names from tile captions / name overlays. The harvested
-# roster is fed to the speaker-name resolver as an extra hint; it does
-# NOT on its own map a name to a specific speaker.
-VIDEO_OCR_ENABLED: bool = os.getenv("VIDEO_OCR_ENABLED", "true").lower() in (
+# ─── On-screen name extraction (video only, VLM-based) ─────────────────────
+# When the input is a video, we can identify speakers directly from their
+# participant tiles using a Vision-Language Model (Qwen 2.5-VL). The
+# pipeline: pick clean mid-turn timestamps from diarization → crop to
+# the active-speaker tile using cheap OpenCV heuristics → ask the VLM
+# for the name on the tile → majority-vote across 2-3 samples per
+# speaker. Output is a direct Speaker-N → name mapping PLUS a roster
+# hint for the transcript-LLM fallback resolver.
+VIDEO_VLM_ENABLED: bool = os.getenv("VIDEO_VLM_ENABLED", "true").lower() in (
     "1", "true", "yes", "on"
 )
-# Frames-per-second to sample. 0.1 → one frame every 10s.
-VIDEO_OCR_SAMPLE_FPS: float = float(os.getenv("VIDEO_OCR_SAMPLE_FPS", "0.1"))
-# Hard cap on number of frames sent through OCR (runtime bound). With the
-# default 0.1 fps, 120 frames covers the first 20 minutes — usually more
-# than enough since tile captions persist throughout the meeting.
-VIDEO_OCR_MAX_FRAMES: int = int(os.getenv("VIDEO_OCR_MAX_FRAMES", "120"))
-# OCR language(s). Comma-separated EasyOCR codes (e.g. "en" or "en,es").
-VIDEO_OCR_LANGS: tuple[str, ...] = tuple(
-    s.strip() for s in os.getenv("VIDEO_OCR_LANGS", "en").split(",") if s.strip()
+# HF model id of the Qwen 2.5-VL variant to use. The 3B instruct model
+# is the best speed/accuracy trade-off for tile-name reading; bump to 7B
+# for harder meetings (low-res recordings, stylized fonts) if you have
+# the VRAM.
+VIDEO_VLM_MODEL: str = os.getenv(
+    "VIDEO_VLM_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct"
+)
+# How many frames to sample per diarized speaker. 3 is the sweet spot:
+# enough to majority-vote confidently without quadrupling inference cost.
+VIDEO_VLM_SAMPLES_PER_SPEAKER: int = int(
+    os.getenv("VIDEO_VLM_SAMPLES_PER_SPEAKER", "3")
+)
+# A turn must last at least this many seconds before we'll sample its
+# middle — shorter turns are prone to UI transitions (active-speaker
+# border hasn't committed yet) and make the crop unreliable. 1.5s is
+# the sweet spot: long enough that the UI has settled, short enough
+# that quick interjectors ("yeah", "right, that makes sense") still
+# get at least one frame sampled instead of being skipped entirely.
+VIDEO_VLM_MIN_SEGMENT_DURATION: float = float(
+    os.getenv("VIDEO_VLM_MIN_SEGMENT_DURATION", "1.5")
+)
+# Expand the detected active-tile bbox by this fraction on each side
+# before cropping, so the label strip (usually just below/beside the
+# video feed) stays inside the crop.
+VIDEO_VLM_TILE_PADDING: float = float(
+    os.getenv("VIDEO_VLM_TILE_PADDING", "0.08")
+)
+# Cap on VLM generation length — we only need the model to emit a name
+# or the word "unknown". Short answers save tokens and reduce the chance
+# of hallucinated follow-up sentences.
+VIDEO_VLM_MAX_NEW_TOKENS: int = int(
+    os.getenv("VIDEO_VLM_MAX_NEW_TOKENS", "16")
 )
 
 LLM_MODEL: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")

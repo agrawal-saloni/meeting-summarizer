@@ -15,11 +15,18 @@ faster-whisper==1.0.3
 pyannote.audio>=3.3.2
 torch>=2.3.1
 torchaudio==2.3.1
-# On-screen name extraction (OCR over sampled video frames). Optional at
-# runtime — src/video_names.py degrades gracefully if easyocr is absent —
-# but installed by default so video inputs get richer speaker-name hints.
-# First use downloads ~100MB of English detection/recognition weights.
-easyocr>=1.7.1
+# On-screen name extraction via a Vision-Language Model. The pipeline
+# in src/video_names.py runs cheap OpenCV heuristics to crop the active
+# speaker tile, then asks Qwen 2.5-VL (loaded via transformers) what
+# name is labeled on it. All three are optional at runtime — the module
+# degrades gracefully if any are missing — but installed by default so
+# video inputs get direct Speaker-N → name mapping. First run downloads
+# the Qwen VL weights (~7GB for 3B, ~15GB for 7B).
+transformers>=4.49.0
+accelerate>=0.33.0
+qwen-vl-utils>=0.0.8
+opencv-python-headless>=4.9.0
+Pillow>=10.2.0
  
 # ─── Summarization & Extraction ────────────────────────────────────────────
 groq>=0.11.0

@@ -74,6 +74,25 @@ _STOPWORDS: frozenset[str] = frozenset(
         "Waiting", "Room", "Lobby", "Gallery", "View", "Pin", "Spotlight",
         "Camera", "Video", "Audio", "Apps", "Reactions", "Breakout",
         "Polls", "Whiteboard", "Captions", "Transcript", "More",
+        # Common sentence-initial English words. OCR sees these capitalized
+        # whenever a slide/caption has them at the start of a line, and
+        # they flood the video roster on presentation-heavy meetings.
+        "Even", "Still", "Always", "Never", "Already", "Once", "Twice",
+        "Every", "Each", "Both", "All", "Any", "Some", "Many", "Few",
+        "More", "Less", "Most", "Least", "Another", "Other", "Same",
+        "Different", "Such", "First", "Second", "Third", "Last", "Next",
+        "Previous", "What", "Why", "How", "Who", "Where", "Which",
+        "Whose", "Whom", "Here", "There", "Then", "Than", "Too",
+        "Very", "Much", "Enough", "Once", "Also", "Often", "Usually",
+        "Sometimes", "Rarely", "Almost", "Nearly", "Quite", "Rather",
+        # Modal / common verbs that start slide bullets.
+        "Should", "Could", "Would", "Must", "Shall", "Will",
+        "Have", "Has", "Had", "Do", "Does", "Did", "Be", "Am", "Are",
+        "Was", "Were", "Been", "Being", "Let", "Go",
+        # Presentation / slide chrome words.
+        "Slide", "Slides", "Agenda", "Outline", "Overview", "Summary",
+        "Introduction", "Conclusion", "Questions", "Discussion", "Break",
+        "Page", "Section", "Chapter", "Appendix", "References", "Demo",
     ]
 )
 

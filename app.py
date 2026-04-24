@@ -12,7 +12,7 @@ from groq import APIStatusError, RateLimitError
 from src.input_processing import DiarizationAccessError, load_meeting
 from src.report import build_report, render_markdown, save_report
 from src.speaker_names import apply_speaker_names, infer_speaker_names
-from src.video_names import extract_video_names
+from src.video_names import identify_speakers_from_video
 
 
 def main() -> None:
@@ -59,27 +59,53 @@ def main() -> None:
 
     if detect_names and any(s.speaker for s in transcript.segments):
         roster: list[str] = []
+        # Stage 1 (video only): VLM reads the active-speaker tile for each
+        # diarized speaker across a few mid-turn frames. When it's
+        # confident (majority vote), we apply the mapping immediately —
+        # this is strictly stronger evidence than anything we can squeeze
+        # out of the transcript alone.
         if transcript.source_type == "video":
-            with st.spinner("Reading names from video (OCR)…"):
+            with st.spinner("Reading names from video (VLM)…"):
                 try:
-                    roster = extract_video_names(transcript.source_path)
+                    evidence = identify_speakers_from_video(
+                        transcript.source_path, transcript
+                    )
                 except Exception as e:  # noqa: BLE001
+                    evidence = None
                     st.warning(f"On-screen name extraction failed: {e}")
-            if roster:
-                st.caption("Names visible on video: " + ", ".join(roster))
+            if evidence is not None:
+                roster = evidence.roster
+                if evidence.mapping:
+                    transcript = apply_speaker_names(transcript, evidence.mapping)
+                    st.caption(
+                        "From video: "
+                        + ", ".join(
+                            f"{k} → **{v}**" for k, v in evidence.mapping.items()
+                        )
+                    )
+                if roster:
+                    st.caption("Names visible on video: " + ", ".join(roster))
 
-        with st.spinner("Detecting speaker names…"):
-            try:
-                mapping = infer_speaker_names(transcript, roster=roster)
-            except Exception as e:  # noqa: BLE001
-                mapping = {}
-                st.warning(f"Speaker-name detection failed: {e}")
-        if mapping:
-            transcript = apply_speaker_names(transcript, mapping)
-            st.caption(
-                "Identified: "
-                + ", ".join(f"{k} → **{v}**" for k, v in mapping.items())
-            )
+        # Stage 2: transcript-side resolver fills in any remaining
+        # "Speaker N" labels using self-intros / vocatives (+ the VLM
+        # roster as a vocabulary hint). Skip cleanly when the VLM
+        # already named everyone.
+        unresolved = any(
+            s.speaker.startswith("Speaker ") for s in transcript.segments
+        )
+        if unresolved:
+            with st.spinner("Detecting speaker names…"):
+                try:
+                    mapping = infer_speaker_names(transcript, roster=roster)
+                except Exception as e:  # noqa: BLE001
+                    mapping = {}
+                    st.warning(f"Speaker-name detection failed: {e}")
+            if mapping:
+                transcript = apply_speaker_names(transcript, mapping)
+                st.caption(
+                    "From transcript: "
+                    + ", ".join(f"{k} → **{v}**" for k, v in mapping.items())
+                )
 
     report = None
     report_error: str | None = None
