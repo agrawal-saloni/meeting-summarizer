@@ -12,6 +12,7 @@ from groq import APIStatusError, RateLimitError
 from src.input_processing import DiarizationAccessError, load_meeting
 from src.report import build_report, render_markdown, save_report
 from src.speaker_names import apply_speaker_names, infer_speaker_names
+from src.video_names import extract_video_names
 
 
 def main() -> None:
@@ -57,9 +58,19 @@ def main() -> None:
             transcript = load_meeting(tmp_path, diarize=False)
 
     if detect_names and any(s.speaker for s in transcript.segments):
+        roster: list[str] = []
+        if transcript.source_type == "video":
+            with st.spinner("Reading names from video (OCR)…"):
+                try:
+                    roster = extract_video_names(transcript.source_path)
+                except Exception as e:  # noqa: BLE001
+                    st.warning(f"On-screen name extraction failed: {e}")
+            if roster:
+                st.caption("Names visible on video: " + ", ".join(roster))
+
         with st.spinner("Detecting speaker names…"):
             try:
-                mapping = infer_speaker_names(transcript)
+                mapping = infer_speaker_names(transcript, roster=roster)
             except Exception as e:  # noqa: BLE001
                 mapping = {}
                 st.warning(f"Speaker-name detection failed: {e}")

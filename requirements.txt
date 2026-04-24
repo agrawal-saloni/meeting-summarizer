@@ -15,6 +15,11 @@ faster-whisper==1.0.3
 pyannote.audio>=3.3.2
 torch>=2.3.1
 torchaudio==2.3.1
+# On-screen name extraction (OCR over sampled video frames). Optional at
+# runtime — src/video_names.py degrades gracefully if easyocr is absent —
+# but installed by default so video inputs get richer speaker-name hints.
+# First use downloads ~100MB of English detection/recognition weights.
+easyocr>=1.7.1
  
 # ─── Summarization & Extraction ────────────────────────────────────────────
 groq>=0.11.0

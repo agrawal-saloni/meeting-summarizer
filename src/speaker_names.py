@@ -63,6 +63,17 @@ _STOPWORDS: frozenset[str] = frozenset(
         "Mr", "Mrs", "Ms", "Dr", "Prof", "Sir", "Madam",
         # common project/meeting nouns that often appear capitalized
         "Q", "QA", "PM", "CEO", "CTO", "VP",
+        # Conferencing-UI chrome that the video-OCR roster would otherwise
+        # pick up on every frame (Zoom / Meet / Teams / Webex toolbars,
+        # pinned-tile labels, overlays). Also harmless in transcripts —
+        # people almost never have these as real first names.
+        "Mute", "Unmute", "Start", "Stop", "Share", "Screen", "Chat",
+        "Record", "Recording", "Participant", "Participants", "Leave",
+        "End", "Join", "Admit", "Meeting", "Meet", "Zoom", "Teams",
+        "Host", "Cohost", "Presenter", "You", "Me",
+        "Waiting", "Room", "Lobby", "Gallery", "View", "Pin", "Spotlight",
+        "Camera", "Video", "Audio", "Apps", "Reactions", "Breakout",
+        "Polls", "Whiteboard", "Captions", "Transcript", "More",
     ]
 )
 
@@ -221,12 +232,23 @@ def _resolve_unambiguous(
 def _format_bundle(
     speaker_labels: list[str],
     evidence: dict[str, _Evidence],
+    roster: list[str] | None = None,
 ) -> str:
-    """Render a compact evidence bundle the LLM can read at a glance."""
+    """Render a compact evidence bundle the LLM can read at a glance.
+
+    ``roster`` is an optional list of real names harvested from the video
+    itself (participant tile captions, etc.). It doesn't tie a name to a
+    specific speaker but narrows the vocabulary of plausible answers.
+    """
     lines: list[str] = [
         "Speaker labels in this meeting: " + ", ".join(speaker_labels),
-        "",
     ]
+    if roster:
+        lines.append(
+            "Participants seen on video (OCR, most-frequent first): "
+            + ", ".join(roster)
+        )
+    lines.append("")
     for spk in speaker_labels:
         ev = evidence.get(spk, _Evidence())
         lines.append(f"=== {spk} ===")
@@ -262,8 +284,17 @@ each speaker, the bundle lists:
   - candidate names that other speakers used while addressing them in
     adjacent turns (weaker evidence)
 
+The bundle may also include a "Participants seen on video" roster — real
+names OCR'd from participant tiles. These names don't tell you WHICH
+speaker is which, but they are the authoritative vocabulary of people
+actually in the meeting.
+
 Rules:
 - Prefer self-introductions over being-addressed evidence.
+- When picking between spellings/variants, prefer a name that appears in
+  the on-screen roster (it's ground truth that the person exists).
+- Do NOT assign a name that is absent from both the transcript evidence
+  AND the on-screen roster — you'd be guessing.
 - Only assign a name when the evidence is unambiguous. When in doubt
   (multiple competing candidates with no clear winner, single weak
   vocative, or a candidate also claimed strongly by another speaker),
@@ -278,11 +309,20 @@ null. Example: {"Speaker 1": "Alice", "Speaker 2": null}
 
 
 # ─── Public API ────────────────────────────────────────────────────────────
-def infer_speaker_names(transcript: Transcript) -> dict[str, str]:
+def infer_speaker_names(
+    transcript: Transcript,
+    roster: list[str] | None = None,
+) -> dict[str, str]:
     """Map "Speaker N" labels to real names where evidence supports it.
 
     Cheap path: regex pre-pass + unambiguous shortcut → no LLM call.
     Expensive path: small evidence bundle → small/cheap model only.
+
+    ``roster`` is an optional list of real names harvested from another
+    source (e.g. OCR over the video's participant tiles). It is used as
+    a vocabulary hint for the LLM; on its own it can't pick which
+    speaker is which, so we don't call the LLM purely for a roster when
+    there's no in-transcript evidence.
 
     Returns a partial mapping (only confident speakers); callers should
     leave unlisted labels untouched.
@@ -313,11 +353,13 @@ def infer_speaker_names(transcript: Transcript) -> dict[str, str]:
             )
         return shortcut
 
-    bundle = _format_bundle(speaker_labels, evidence)
+    bundle = _format_bundle(speaker_labels, evidence, roster=roster)
     reason = "ambiguous self-intros" if shortcut is None else "vocatives only"
+    roster_note = f", roster={len(roster)}" if roster else ""
     print(
         f"[speaker-names] regex {reason} → calling {SPEAKER_NAME_MODEL} "
-        f"with {len(bundle)}-byte bundle ({len(speaker_labels)} speakers)"
+        f"with {len(bundle)}-byte bundle "
+        f"({len(speaker_labels)} speakers{roster_note})"
     )
     raw = complete(
         system=_LLM_PROMPT,
@@ -362,9 +404,11 @@ def apply_speaker_names(
     return transcript.model_copy(update={"segments": new_segments})
 
 
-# ─── Helpers exposed for tests ─────────────────────────────────────────────
-# Stable handles for the regex helpers so tests can exercise them directly
-# without depending on internal collection logic.
+# ─── Helpers exposed for tests and sibling modules ─────────────────────────
+# Stable handles so tests can exercise the helpers directly, and so
+# sibling modules (e.g. video_names) can reuse the same name-token filter
+# without reaching into the private API.
+is_name_token = _is_name_token
 extract_self_intros = _extract_self_intros
 extract_vocatives = _extract_vocatives
 collect_evidence = _collect_evidence

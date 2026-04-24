@@ -277,3 +277,64 @@ def test_format_bundle_lists_every_label() -> None:
     assert "=== Speaker 2 ===" in bundle
     assert "Alice" in bundle
     assert "(none found)" in bundle  # Speaker 2 has no evidence
+
+
+def test_format_bundle_includes_roster_when_provided() -> None:
+    ev = collect_evidence([_seg("Speaker 1", "I'm Alice.")])
+    bundle = format_bundle(
+        ["Speaker 1"], ev, roster=["Alice", "Bob"]
+    )
+    assert "Participants seen on video" in bundle
+    assert "Alice, Bob" in bundle
+
+
+def test_format_bundle_omits_roster_line_when_empty() -> None:
+    ev = collect_evidence([_seg("Speaker 1", "I'm Alice.")])
+    bundle = format_bundle(["Speaker 1"], ev, roster=[])
+    assert "Participants seen on video" not in bundle
+
+
+# ─── Roster plumbing end-to-end ────────────────────────────────────────────
+class TestRosterPlumbing:
+    def test_roster_passed_into_llm_bundle(self) -> None:
+        # Vocative-only transcript forces the LLM path; we then assert the
+        # bundle it receives contains the roster line.
+        t = _transcript([
+            _seg("Speaker 1", "Let's start."),
+            _seg("Speaker 2", "Thanks, Alice."),
+            _seg("Speaker 1", "Sure."),
+        ])
+        with patch(
+            "src.speaker_names.complete",
+            return_value={"Speaker 1": "Alice", "Speaker 2": None},
+        ) as mock_complete:
+            infer_speaker_names(t, roster=["Alice", "Carol"])
+
+        bundle = mock_complete.call_args.kwargs["user"]
+        assert "Participants seen on video" in bundle
+        assert "Alice, Carol" in bundle
+
+    def test_roster_does_not_force_llm_call_without_transcript_evidence(
+        self,
+    ) -> None:
+        # A roster on its own can't map speakers → we must still skip the
+        # LLM when there's no transcript-side signal to anchor to.
+        t = _transcript([
+            _seg("Speaker 1", "Yeah."),
+            _seg("Speaker 2", "Okay."),
+        ])
+        with patch("src.speaker_names.complete") as mock_complete:
+            mapping = infer_speaker_names(t, roster=["Alice", "Bob"])
+        mock_complete.assert_not_called()
+        assert mapping == {}
+
+    def test_roster_none_is_back_compat(self) -> None:
+        # Calling without roster must behave exactly like the old API.
+        t = _transcript([
+            _seg("Speaker 1", "Hi, I'm Alice."),
+            _seg("Speaker 2", "I'm Bob."),
+        ])
+        with patch("src.speaker_names.complete") as mock_complete:
+            mapping = infer_speaker_names(t)
+        mock_complete.assert_not_called()
+        assert mapping == {"Speaker 1": "Alice", "Speaker 2": "Bob"}

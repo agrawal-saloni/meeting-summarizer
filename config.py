@@ -42,6 +42,25 @@ MERGE_MAX_CHARS: int = int(os.getenv("MERGE_MAX_CHARS", "600"))
 
 DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 
+# ─── On-screen name extraction (video only) ────────────────────────────────
+# When the input is a video, we can OCR sampled frames to harvest real
+# participant names from tile captions / name overlays. The harvested
+# roster is fed to the speaker-name resolver as an extra hint; it does
+# NOT on its own map a name to a specific speaker.
+VIDEO_OCR_ENABLED: bool = os.getenv("VIDEO_OCR_ENABLED", "true").lower() in (
+    "1", "true", "yes", "on"
+)
+# Frames-per-second to sample. 0.1 → one frame every 10s.
+VIDEO_OCR_SAMPLE_FPS: float = float(os.getenv("VIDEO_OCR_SAMPLE_FPS", "0.1"))
+# Hard cap on number of frames sent through OCR (runtime bound). With the
+# default 0.1 fps, 120 frames covers the first 20 minutes — usually more
+# than enough since tile captions persist throughout the meeting.
+VIDEO_OCR_MAX_FRAMES: int = int(os.getenv("VIDEO_OCR_MAX_FRAMES", "120"))
+# OCR language(s). Comma-separated EasyOCR codes (e.g. "en" or "en,es").
+VIDEO_OCR_LANGS: tuple[str, ...] = tuple(
+    s.strip() for s in os.getenv("VIDEO_OCR_LANGS", "en").split(",") if s.strip()
+)
+
 LLM_MODEL: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 LLM_FALLBACK_MODEL: str | None = (
     os.getenv("LLM_FALLBACK_MODEL") or "llama-3.1-8b-instant"
