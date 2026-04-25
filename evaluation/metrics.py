@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from bert_score import score as _bert_score
+from bert_score import BERTScorer
 from rapidfuzz import fuzz
 from rouge_score import rouge_scorer
 from sentence_transformers import SentenceTransformer, util
@@ -25,6 +25,7 @@ _rouge = rouge_scorer.RougeScorer(
     ["rouge1", "rouge2", "rougeL"], use_stemmer=True
 )
 _encoder: SentenceTransformer | None = None
+_bert_scorer: BERTScorer | None = None
 
 
 # ─── ROUGE ─────────────────────────────────────────────────────────────────
@@ -48,10 +49,23 @@ def rouge_corpus(predictions: list[str], references: list[str]) -> dict[str, flo
 
 
 # ─── BERTScore ─────────────────────────────────────────────────────────────
+def _get_bert_scorer(lang: str = "en") -> BERTScorer:
+    """Cache the underlying RoBERTa model across calls.
+
+    `bert_score.score` reloads the model every call, which both spams the
+    "Some weights of RobertaModel were not initialized…" warning and adds
+    ~5–10s of latency per meeting. Reusing one BERTScorer avoids both.
+    """
+    global _bert_scorer
+    if _bert_scorer is None:
+        _bert_scorer = BERTScorer(lang=lang, rescale_with_baseline=False)
+    return _bert_scorer
+
+
 def bertscore_corpus(
     predictions: list[str], references: list[str], lang: str = "en"
 ) -> dict[str, float]:
-    P, R, F1 = _bert_score(predictions, references, lang=lang, verbose=False)
+    P, R, F1 = _get_bert_scorer(lang).score(predictions, references)
     return {
         "bertscore_p": float(P.mean()),
         "bertscore_r": float(R.mean()),
