@@ -14,7 +14,10 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event, Thread
+from typing import Iterator, Literal
 
 import ffmpeg
 import pysrt
@@ -130,6 +133,68 @@ def load_meeting(path: str | Path, diarize: bool = True) -> Transcript:
         return _transcribe_audio(path, diarize=diarize,
                                  source_path=str(path), source_type="audio")
     return _parse_transcript_file(path)
+
+
+# ─── Streaming entry point ─────────────────────────────────────────────────
+@dataclass
+class StreamEvent:
+    """One incremental update from the streaming pipeline.
+
+    - ``type="segment"`` — a new ASR segment is ready. ``segment`` holds it
+      and ``index`` is its 0-based position in the running segment list.
+      ``speaker`` is the placeholder ``"Speaker ?"`` until diarization
+      back-fills it.
+    - ``type="speakers"`` — diarization just produced (or finished
+      producing) turns; ``segments`` is the full segment list with
+      pyannote speaker ids merged in. The UI should swap its current list
+      with this one.
+    - ``type="done"`` — the final, post-processed ``Transcript`` (speaker
+      labels normalized, consecutive same-speaker segments merged).
+    """
+
+    type: Literal["segment", "speakers", "done"]
+    segment: TranscriptSegment | None = None
+    index: int | None = None
+    segments: list[TranscriptSegment] = field(default_factory=list)
+    transcript: Transcript | None = None
+
+
+def stream_load_meeting(
+    path: str | Path, diarize: bool = True
+) -> Iterator[StreamEvent]:
+    """Live-ASR variant of ``load_meeting``.
+
+    Yields ``StreamEvent``s as Whisper produces segments. When diarization
+    is enabled, it runs in a background thread and the generator emits a
+    single ``"speakers"`` event the moment its turns are ready, back-filling
+    speaker labels on every segment seen so far. Subsequent segments are
+    labeled inline. The terminal ``"done"`` event carries the fully
+    assembled ``Transcript`` (same shape as ``load_meeting``'s return).
+
+    Transcript inputs (txt/srt/vtt) have nothing to stream — they yield a
+    single ``"done"`` event with the parsed transcript so callers can use
+    one code path.
+    """
+    path = Path(path)
+    input_type = detect_input_type(path)
+
+    if input_type == "transcript":
+        yield StreamEvent(type="done", transcript=_parse_transcript_file(path))
+        return
+
+    if input_type == "video":
+        audio_path = _extract_audio_from_video(path)
+        source_type: Literal["video", "audio"] = "video"
+    else:
+        audio_path = path
+        source_type = "audio"
+
+    yield from _stream_transcribe_audio(
+        audio_path,
+        diarize=diarize,
+        source_path=str(path),
+        source_type=source_type,
+    )
 
 
 # ─── Video → Audio ─────────────────────────────────────────────────────────
@@ -355,6 +420,172 @@ def _transcribe_audio(
             "realtime_factor": round(speed, 2),
         },
     )
+
+
+def _stream_transcribe_audio(
+    audio_path: Path,
+    diarize: bool,
+    source_path: str,
+    source_type: Literal["video", "audio"],
+) -> Iterator[StreamEvent]:
+    """Stream Whisper segments live; back-fill speakers when diarization lands.
+
+    Pyannote runs concurrently with the ASR loop on a daemon thread and
+    signals completion via an ``Event``. We poll that event after every
+    Whisper segment, so the moment turns are ready we:
+      1. assign speakers to every segment seen so far (``_merge_speakers``)
+      2. emit a single ``"speakers"`` ``StreamEvent``
+      3. label all subsequent segments inline before yielding them
+    """
+    t_start = time.time()
+    file_mb = audio_path.stat().st_size / 1e6
+    print(f"[asr-stream] file={audio_path.name}  size={file_mb:.1f} MB  "
+          f"diarize={diarize}")
+
+    # Pre-warm both models on the main thread so concurrent inference doesn't
+    # race on the lazy-init singletons (and so model-load logs don't
+    # interleave with streaming segment logs).
+    _get_whisper()
+    if diarize:
+        _get_diarization_pipeline()
+
+    # ── Background diarization ────────────────────────────────────────────
+    diar_done = Event()
+    diar_box: dict[str, object] = {"turns": None, "error": None}
+
+    def _bg_diarize() -> None:
+        try:
+            diar_box["turns"] = _run_diarization(audio_path)
+        except Exception as exc:  # noqa: BLE001
+            diar_box["error"] = exc
+        finally:
+            diar_done.set()
+
+    diar_thread: Thread | None = None
+    if diarize:
+        diar_thread = Thread(
+            target=_bg_diarize, name="meet-diarize", daemon=True
+        )
+        diar_thread.start()
+    else:
+        diar_done.set()  # nothing to wait for
+
+    # ── Whisper streaming loop ────────────────────────────────────────────
+    model = _get_whisper()
+    t_iter_start = time.time()
+    segments_iter, info = model.transcribe(
+        str(audio_path),
+        beam_size=ASR_BEAM_SIZE,
+        vad_filter=ASR_VAD_FILTER,
+    )
+    print(f"[asr-stream] language={info.language} "
+          f"(prob={info.language_probability:.2f})  "
+          f"duration={info.duration:.1f}s  beam={ASR_BEAM_SIZE}  "
+          f"vad={ASR_VAD_FILTER}")
+
+    segments: list[TranscriptSegment] = []
+    diar_applied = False
+    last_log_audio_t = 0.0
+
+    for i, seg in enumerate(segments_iter, start=1):
+        # Inline-label new segments once diarization turns are available.
+        if diar_applied and diar_box["turns"] is not None:
+            speaker = _best_speaker(
+                seg.start, seg.end, diar_box["turns"]  # type: ignore[arg-type]
+            )
+        else:
+            speaker = "Speaker ?"
+
+        ts = TranscriptSegment(
+            speaker=speaker,
+            start_time=seg.start,
+            end_time=seg.end,
+            text=seg.text.strip(),
+        )
+        segments.append(ts)
+        yield StreamEvent(type="segment", segment=ts, index=len(segments) - 1)
+
+        # First segment after diarization completes triggers a back-fill.
+        # Errors are surfaced once ASR finishes (we don't abort the live
+        # stream over a diarization failure — the transcript is still
+        # useful, just speaker-less).
+        if diarize and not diar_applied and diar_done.is_set():
+            if diar_box["turns"] is not None:
+                segments = _merge_speakers(
+                    segments, diar_box["turns"]  # type: ignore[arg-type]
+                )
+                yield StreamEvent(type="speakers", segments=list(segments))
+            diar_applied = True
+
+        if i % 10 == 0 or seg.end - last_log_audio_t >= 30:
+            wall = time.time() - t_iter_start
+            rtf = wall / max(seg.end, 0.01)
+            print(f"[asr-stream]  …seg {i:4d}  audio {seg.end:6.1f}s  "
+                  f"wall {wall:5.1f}s  rtf={rtf:.2f}x  "
+                  f"diar={'done' if diar_applied else 'pending'}")
+            last_log_audio_t = seg.end
+
+    t_asr = time.time() - t_iter_start
+    speed = info.duration / max(t_asr, 0.01)
+    print(f"[asr-stream] ✅ {len(segments)} segments, {info.duration:.1f}s "
+          f"audio in {t_asr:.1f}s wall ({speed:.1f}x realtime)")
+
+    # ── ASR finished before diarization: wait for it ──────────────────────
+    if diarize and not diar_applied:
+        if diar_thread is not None and not diar_done.is_set():
+            print("[asr-stream] waiting on diarization…")
+        diar_done.wait()
+        if diar_box["turns"] is not None:
+            segments = _merge_speakers(
+                segments, diar_box["turns"]  # type: ignore[arg-type]
+            )
+            yield StreamEvent(type="speakers", segments=list(segments))
+        diar_applied = True
+
+    # Surface diarization errors now (after the live stream is complete) so
+    # the caller can decide whether to retry without diarization. Most
+    # importantly we re-raise DiarizationAccessError unchanged for app.py.
+    if diarize and isinstance(diar_box["error"], BaseException):
+        raise diar_box["error"]  # type: ignore[misc]
+
+    if not diarize:
+        print("[diarize] skipped (diarize=False)")
+
+    # ── Final cleanup: same as the batch path ─────────────────────────────
+    segments = _normalize_speaker_labels(segments)
+    pre_merge = len(segments)
+    segments = _merge_consecutive_segments(
+        segments,
+        max_gap=MERGE_MAX_GAP_SECONDS,
+        max_duration=MERGE_MAX_DURATION_SECONDS,
+        max_chars=MERGE_MAX_CHARS,
+    )
+    print(f"[merge] {pre_merge} → {len(segments)} segments "
+          f"(gap≤{MERGE_MAX_GAP_SECONDS}s, dur≤{MERGE_MAX_DURATION_SECONDS}s, "
+          f"chars≤{MERGE_MAX_CHARS})")
+
+    total = time.time() - t_start
+    print(f"[pipeline] total {total:.1f}s for {info.duration:.1f}s audio")
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    transcript = Transcript(
+        source_path=source_path,
+        source_type=source_type,
+        duration_seconds=info.duration,
+        segments=segments,
+        metadata={
+            "language": info.language,
+            "language_confidence": round(info.language_probability, 3),
+            "asr_model": ASR_MODEL,
+            "asr_wall_seconds": round(t_asr, 2),
+            "total_wall_seconds": round(total, 2),
+            "realtime_factor": round(speed, 2),
+            "live_stream": True,
+        },
+    )
+    yield StreamEvent(type="done", transcript=transcript)
 
 
 def _merge_speakers(

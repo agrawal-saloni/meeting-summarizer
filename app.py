@@ -4,15 +4,79 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Iterator
 
 import pandas as pd
 import streamlit as st
 from groq import APIStatusError, RateLimitError
 
-from src.input_processing import DiarizationAccessError, load_meeting
+from src.input_processing import (
+    DiarizationAccessError,
+    StreamEvent,
+    stream_load_meeting,
+)
 from src.report import build_report, render_markdown, save_report
+from src.schemas import Transcript, TranscriptSegment
 from src.speaker_names import apply_speaker_names, infer_speaker_names
 from src.video_names import identify_speakers_from_video
+
+
+def _render_live_segments(
+    container, segments: list[TranscriptSegment], *, speakers_ready: bool
+) -> None:
+    """Re-render the live-transcript placeholder.
+
+    While diarization is still running, every segment carries the placeholder
+    label ``"Speaker ?"``. We hide it so the captions read cleanly; the
+    moment diarization back-fills real ids, ``speakers_ready`` flips to
+    True and the labels appear in front of every line.
+    """
+    with container.container():
+        if not segments:
+            st.caption("Listening…")
+            return
+        st.caption(
+            f"{len(segments)} segments transcribed"
+            + ("" if speakers_ready else "  ·  speakers will appear once diarization finishes")
+        )
+        for seg in segments:
+            label = seg.speaker.strip()
+            show_label = (
+                speakers_ready
+                and label
+                and label.lower() not in {"speaker ?", "unknown"}
+            )
+            prefix = f"**{label}** " if show_label else ""
+            st.write(f"{prefix}`{seg.start_time:.1f}s`: {seg.text}")
+
+
+def _consume_stream(
+    events: Iterator[StreamEvent], placeholder
+) -> Transcript:
+    """Drain a ``stream_load_meeting`` iterator, updating the live placeholder.
+
+    Returns the final ``Transcript`` from the terminal ``"done"`` event.
+    """
+    segments: list[TranscriptSegment] = []
+    speakers_ready = False
+    final: Transcript | None = None
+
+    for event in events:
+        if event.type == "segment" and event.segment is not None:
+            segments.append(event.segment)
+        elif event.type == "speakers":
+            segments = list(event.segments)
+            speakers_ready = True
+        elif event.type == "done" and event.transcript is not None:
+            final = event.transcript
+            break
+        _render_live_segments(
+            placeholder, segments, speakers_ready=speakers_ready
+        )
+
+    if final is None:
+        raise RuntimeError("Stream ended without a 'done' event")
+    return final
 
 
 def main() -> None:
@@ -48,14 +112,36 @@ def main() -> None:
         tmp.write(uploaded.getvalue())
         tmp_path = Path(tmp.name)
 
-    with st.spinner("Transcribing…"):
+    # Live-ASR section: Whisper segments stream into this placeholder as
+    # they're produced. Diarization runs in parallel; speaker labels
+    # back-fill across all rendered rows the moment its turns are ready.
+    st.subheader("Live transcript")
+    live_status = st.status(
+        "Transcribing… (diarization runs in parallel)" if diarize
+        else "Transcribing…",
+        expanded=True,
+    )
+    with live_status:
+        live_placeholder = st.empty()
         try:
-            transcript = load_meeting(tmp_path, diarize=diarize)
+            transcript = _consume_stream(
+                stream_load_meeting(tmp_path, diarize=diarize),
+                live_placeholder,
+            )
         except DiarizationAccessError as e:
             st.error("Speaker diarization unavailable")
             st.code(str(e))
             st.info("Retrying without diarization…")
-            transcript = load_meeting(tmp_path, diarize=False)
+            live_placeholder = st.empty()
+            transcript = _consume_stream(
+                stream_load_meeting(tmp_path, diarize=False),
+                live_placeholder,
+            )
+    live_status.update(
+        label=f"Transcription complete · {len(transcript.segments)} segments",
+        state="complete",
+        expanded=False,
+    )
 
     if detect_names and any(s.speaker for s in transcript.segments):
         roster: list[str] = []
