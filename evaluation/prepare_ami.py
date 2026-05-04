@@ -18,6 +18,10 @@ We materialize each selected meeting as:
   data/raw/ami/<id>.mp4          (video + Mix-Headset audio, muxed)
   data/gold/ami/<id>.json        ({"summary": ..., "action_items": []})
 
+CLI: ``python -m evaluation.prepare_ami`` (default four ``…a`` meetings);
+``python -m evaluation.prepare_ami --extra-six`` appends six more QMSum-test
+ids with gold; or pass explicit ``--meetings …`` (see argparse help).
+
 Gold summaries are *reused* from the QMSum benchmark when available
 (QMSum's test split happens to include several AMI scenario meetings),
 so you don't need to re-annotate. If a meeting isn't covered by QMSum,
@@ -43,6 +47,19 @@ from config import GOLD_DIR, RAW_DIR
 # eval finishes in a reasonable wall time. All four have QMSum gold
 # summaries we can reuse without re-annotating.
 DEFAULT_MEETINGS = ["ES2004a", "ES2011a", "IS1003a", "TS3004a"]
+
+# Six more meetings from QMSum's *test* split (same ``general_query`` gold as
+# the default ids).  Complements the four ``…a`` kickoffs with ``b`` sessions
+# plus one extra series (``TS3011a``) — all have JSON at
+# ``Yale-LILY/QMSum/.../data/ALL/test/<id>.json``.
+EXTRA_MEETINGS = [
+    "ES2004b",
+    "ES2004c",
+    "ES2011b",
+    "IS1003b",
+    "TS3004b",
+    "TS3011a",
+]
 
 _QMSUM_GOLD_URL = (
     "https://raw.githubusercontent.com/Yale-LILY/QMSum/main/"
@@ -260,8 +277,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--meetings",
         nargs="*",
-        default=DEFAULT_MEETINGS,
-        help="AMI meeting ids to download (default: a 2-meeting subset)",
+        default=None,
+        help=(
+            "AMI meeting ids to download (default: DEFAULT_MEETINGS — four "
+            "``…a`` sessions). Pass explicit ids to override."
+        ),
+    )
+    parser.add_argument(
+        "--extra-six",
+        action="store_true",
+        help=(
+            "Append EXTRA_MEETINGS (six more QMSum-test AMI sessions with "
+            "gold summaries) after resolving ``--meetings``."
+        ),
     )
     parser.add_argument("--benchmark", default="ami")
     parser.add_argument(
@@ -284,7 +312,17 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    meetings = list(args.meetings) if args.meetings is not None else list(
+        DEFAULT_MEETINGS
+    )
+    if args.extra_six:
+        seen = set(meetings)
+        for m in EXTRA_MEETINGS:
+            if m not in seen:
+                meetings.append(m)
+                seen.add(m)
+
     names = prepare(
-        args.meetings, args.benchmark, args.camera, args.keep_intermediate
+        meetings, args.benchmark, args.camera, args.keep_intermediate
     )
     print(f"[ami] prepared {len(names)} meetings under benchmark={args.benchmark!r}")
